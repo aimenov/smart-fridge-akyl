@@ -1,0 +1,8 @@
+---
+description: Keep the git history current—commit substantive changes during implementation
+alwaysApply: true
+---
+
+# Git commits for this project
+
+Whenever you change project files as part of a task, finish by **staging and committing** those changes with a clear message (unless the user explicitly asks you not to commit). Use conventional prefixes when helpful (`feat:`, `fix:`, `chore:`, `test:`). When the user asks to sync with the remote, **push** after committing.

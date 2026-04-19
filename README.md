@@ -45,6 +45,31 @@ Copy `.env.example` to `.env`. Telegram variables are prefixed with `SMART_FRIDG
 pytest tests/ --cov=backend --cov-report=term-missing
 ```
 
+## Publish to GitHub
+
+GitHub CLI (`winget install GitHub.cli`) must be logged in once:
+
+```powershell
+$env:Path = "$env:ProgramFiles\GitHub CLI;$env:Path"
+gh auth login -p https -h github.com -w
+.\scripts\push-to-github.ps1
+```
+
+That creates **`smart-fridge-akyl`** under your account, adds **`origin`**, and pushes **`master`**. If the repo name is taken, edit `scripts/push-to-github.ps1` or run:
+
+```powershell
+gh repo create YOUR-NAME --public --source=. --remote=origin --push
+```
+
+If **`origin`** already exists: `git remote remove origin`, then run the script again.
+
+Alternatively, create an **empty** repository on GitHub (no README), then:
+
+```powershell
+git remote add origin https://github.com/YOU/REPO.git
+git push -u origin master
+```
+
 ## Optional OCR
 
 ```powershell
