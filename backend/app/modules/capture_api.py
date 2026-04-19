@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 import uuid
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ from backend.app.models.entities import DateType, ItemLocation, ScanRecord
 from backend.app.modules import inventory_service, vision_pipeline
 from backend.app.modules import vlm_fallback
 from backend.app.modules.inventory_service import CONFIDENCE_HIGH, CONFIDENCE_MEDIUM
+from backend.app.json_safe import json_safe
 from backend.app.observability import begin_trace, end_trace, trace_prefix
 
 from backend.app.schemas.dto import (
@@ -80,11 +82,12 @@ async def upload_scan(
                 result.confidence,
             )
 
+        safe_stages = json_safe(result.stages)
         scan = ScanRecord(
             captured_image_paths=[str(p) for p in paths],
             ocr_text=result.raw_ocr_text,
             model_outputs={"barcode": result.barcode},
-            pipeline_stages=result.stages,
+            pipeline_stages=safe_stages if isinstance(safe_stages, dict) else {},
             parsed_date_type=result.date_type if result.date_type != DateType.unknown else None,
             raw_date_text=result.raw_date_text,
             normalized_date=result.normalized_date,
@@ -98,17 +101,21 @@ async def upload_scan(
             barcode=result.barcode,
         )
 
+        conf = float(result.confidence)
+        if math.isnan(conf) or math.isinf(conf):
+            conf = 0.0
+
         return ScanUploadResponse(
             scan_id=scan.id,
             stage="done",
-            confidence=result.confidence,
-            confidence_tier=_tier(result.confidence),
+            confidence=conf,
+            confidence_tier=_tier(conf),
             product_guess=product_guess,
             date_type=result.date_type.value if result.date_type else None,
             raw_date_text=result.raw_date_text,
             normalized_date=result.normalized_date,
             barcode=result.barcode,
-            pipeline=result.stages,
+            pipeline=safe_stages if isinstance(safe_stages, dict) else {},
         )
     finally:
         elapsed = time.perf_counter() - t_request
@@ -144,7 +151,18 @@ def confirm_scan(body: ConfirmScanRequest, db: Session = Depends(get_db)):
 
     inferred = None
     if body.inferred_date_type:
-        inferred = DateType(body.inferred_date_type)
+        try:
+            inferred = DateType(body.inferred_date_type)
+        except ValueError:
+            raise HTTPException(
+                422,
+                f"invalid inferred_date_type: {body.inferred_date_type!r}",
+            ) from None
+
+    try:
+        location = ItemLocation(body.location)
+    except ValueError:
+        raise HTTPException(422, f"invalid location: {body.location!r}") from None
 
     item, dup = inventory_service.create_item_from_confirm(
         db,
@@ -152,7 +170,7 @@ def confirm_scan(body: ConfirmScanRequest, db: Session = Depends(get_db)):
         quantity=body.quantity,
         unit=body.unit,
         expiry_date=body.expiry_date,
-        location=ItemLocation(body.location),
+        location=location,
         inferred_date_type=inferred,
         scan=scan,
     )

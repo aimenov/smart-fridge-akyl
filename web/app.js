@@ -206,30 +206,45 @@ async function runScanFlow() {
   status.textContent = "done";
   playDoneSound();
 
-  document.getElementById("tier").textContent = data.confidence_tier;
-  document.getElementById("tier").className = "status-pill " + data.confidence_tier;
-  document.getElementById("conf").textContent = data.confidence.toFixed(2);
-  document.getElementById("product-name").value = data.product_guess?.canonical_name || "";
-  document.getElementById("barcode").value = data.barcode || "";
-  document.getElementById("expiry").value = data.normalized_date || "";
+  const tierEl = document.getElementById("tier");
+  const confEl = document.getElementById("conf");
+  const tier = data.confidence_tier || "low";
+  const confNum = Number(data.confidence);
+  if (tierEl) {
+    tierEl.textContent = tier;
+    tierEl.className = "status-pill " + tier;
+  }
+  if (confEl) {
+    confEl.textContent = Number.isFinite(confNum) ? confNum.toFixed(2) : "—";
+  }
+
+  const pg = data.product_guess || {};
+  document.getElementById("product-name").value = pg.canonical_name || "";
+  document.getElementById("barcode").value = data.barcode ?? "";
+  let exp = data.normalized_date || "";
+  if (typeof exp === "string" && exp.length > 10) exp = exp.slice(0, 10);
+  document.getElementById("expiry").value = exp;
   document.getElementById("date-type").value = data.date_type || "";
 
   confirmBox.classList.remove("hidden");
 }
 
 async function confirmScan() {
+  let qty = parseFloat(document.getElementById("qty").value || "1");
+  if (!Number.isFinite(qty) || qty <= 0) qty = 1;
+
   const body = {
     scan_id: lastScanResult.scan_id,
     product: {
-      canonical_name: document.getElementById("product-name").value || "Unknown product",
-      barcode: document.getElementById("barcode").value || null,
+      canonical_name: document.getElementById("product-name").value.trim() || "Unknown product",
+      barcode: document.getElementById("barcode").value.trim() || null,
       brand: null,
       default_unit: null,
       category: null,
     },
-    quantity: parseFloat(document.getElementById("qty").value || "1"),
-    unit: document.getElementById("unit").value || "each",
-    expiry_date: document.getElementById("expiry").value || null,
+    quantity: qty,
+    unit: document.getElementById("unit").value.trim() || "each",
+    expiry_date: document.getElementById("expiry").value.trim() || null,
     location: document.getElementById("location").value || "fridge",
     inferred_date_type: document.getElementById("date-type").value || null,
   };

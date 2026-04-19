@@ -54,7 +54,7 @@ class ScanUploadResponse(BaseModel):
 class ConfirmScanRequest(BaseModel):
     scan_id: int
     product: ProductCreate
-    quantity: float = 1.0
+    quantity: float = Field(1.0, gt=0)
     unit: str = "each"
     expiry_date: Optional[date] = None
     location: str = "fridge"
