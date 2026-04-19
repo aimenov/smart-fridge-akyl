@@ -45,43 +45,9 @@ Copy `.env.example` to `.env`. Telegram variables are prefixed with `SMART_FRIDG
 pytest tests/ --cov=backend --cov-report=term-missing
 ```
 
-## Publish to GitHub
+## Repository
 
-Git alone cannot create a repository on GitHub servers; you either use the **website**, **`gh`**, or a **Personal Access Token** with `curl`.
-
-### Option A — Git Bash + token (creates `smart-fridge-akyl` and pushes `master`)
-
-1. Create a **classic** PAT with **`repo`** scope: https://github.com/settings/tokens/new  
-2. In **Git Bash**:
-
-```bash
-cd /c/Users/user/Documents/Projects/smart-fridge-akyl
-export GITHUB_TOKEN=ghp_your_token_here
-bash scripts/create-and-push-gitbash.sh
-```
-
-The script removes the token from the saved `origin` URL after the first push.
-
-### Option B — Git GUI / website only (no API token)
-
-1. Create an **empty** repository named **`smart-fridge-akyl`** (no README): https://github.com/new  
-2. Then in **Git Bash**, **CMD**, or **Git GUI → Remote**:
-
-```bash
-bash scripts/add-remote-and-push-gitbash.sh YOUR_USERNAME
-```
-
-(or add `origin` and `git push -u origin master` manually).
-
-Use **Git Credential Manager** when Windows prompts for login.
-
-### Option C — GitHub CLI (optional)
-
-```powershell
-$env:Path = "$env:ProgramFiles\GitHub CLI;$env:Path"
-gh auth login -p https -h github.com -w
-.\scripts\push-to-github.ps1
-```
+Source: [github.com/aimenov/smart-fridge-akyl](https://github.com/aimenov/smart-fridge-akyl)
 
 ## Optional OCR
 
