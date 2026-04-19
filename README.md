@@ -60,26 +60,10 @@ pytest tests/ --cov=backend --cov-report=term-missing
 
 Source: [github.com/aimenov/smart-fridge-akyl](https://github.com/aimenov/smart-fridge-akyl)
 
-## Optional OCR
+## OCR (same install as development)
 
-Barcode/QR detection works without extra packages; **printed product names and expiry dates** need OCR.
+Barcode/QR work out of the box; **printed names and expiry dates** need OCR. **`pip install -e ".[dev]"`** pulls in **Pillow**, **pytesseract**, tests, and — on Python **below 3.14** — **Paddle** + **PaddleOCR** (PyPI has no Paddle wheels for 3.14 yet; use Tesseract only, or Python **3.12** if you want Paddle).
 
-From the repo root:
+Install the **Tesseract** binary and put `tesseract` on `PATH` for the Tesseract fallback ([Windows builds](https://github.com/UB-Mannheim/tesseract/wiki)).
 
-```powershell
-pip install ".[ocr]"
-```
-
-That installs **Pillow** and **pytesseract** (label OCR via the **Tesseract** engine). Install the **Tesseract** binary and ensure `tesseract` is on `PATH` (Windows: [UB Mannheim builds](https://github.com/UB-Mannheim/tesseract/wiki)).
-
-### PaddleOCR (often better on printed packaging)
-
-PyPI ships **paddlepaddle** only for certain Python versions (typically **3.9–3.12** on 64‑bit Windows/Linux). **Python 3.14+ usually has no wheels**, so `pip install paddlepaddle` fails with *“No matching distribution”* — use Python **3.12** (recommended) or **3.11** for Paddle, or stay on Tesseract-only `[ocr]` above.
-
-With a compatible Python:
-
-```powershell
-pip install ".[ocr]" ".[ocr-paddle]"
-```
-
-The server keeps one shared Paddle model in memory when Paddle loads. Point the phone at the **flat label** with text in focus and reasonable light.
+The server keeps one shared Paddle model in memory when Paddle is installed. Point the phone at the **flat label** with text in focus and reasonable light.
