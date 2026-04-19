@@ -70,4 +70,6 @@ Install the **Tesseract** binary and put `tesseract` on `PATH` for the Tesseract
 
 Optional env (see `backend/app/config.py`): **`SMART_FRIDGE_OCR_LANG`** (first Paddle language to try), **`SMART_FRIDGE_TESSERACT_LANGS`** (default `eng+rus` — add `+kaz` if you install Kazakh `traineddata`).
 
+Regression image (optional): put **`tests/integration/fixtures/Nestle NAN На козьем молоке 3.jpg`** in the repo and run `pytest tests/integration/test_nestle_label_fixture.py -m integration` to verify OCR + product-title extraction against that label.
+
 The server keeps one shared Paddle model in memory when Paddle is installed. Point the phone at the **flat label** with text in focus and reasonable light.

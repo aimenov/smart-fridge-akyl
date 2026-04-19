@@ -22,6 +22,19 @@ from backend.app.observability import trace_prefix
 
 logger = logging.getLogger(__name__)
 
+
+def _load_image_bgr(path: Path) -> Optional[np.ndarray]:
+    """Decode image with ``cv2.imdecode`` — ``cv2.imread`` often fails on Unicode paths (Windows)."""
+    try:
+        raw = Path(path).expanduser().resolve().read_bytes()
+        if not raw:
+            return None
+        buf = np.frombuffer(raw, dtype=np.uint8)
+        return cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    except OSError:
+        return None
+
+
 _MISSING = object()
 _paddle_singleton: Any = None
 
@@ -365,7 +378,7 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
     ocr_wall_s = 0.0
 
     t_load0 = time.perf_counter()
-    images_bgr = [cv2.imread(str(p)) for p in image_paths]
+    images_bgr = [_load_image_bgr(Path(p)) for p in image_paths]
     images_bgr = [im for im in images_bgr if im is not None]
     timing_ms["load_images"] = (time.perf_counter() - t_load0) * 1000.0
     if not images_bgr:

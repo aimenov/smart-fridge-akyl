@@ -53,10 +53,10 @@ def test_vlm_called_when_enabled_low_confidence(client, vlm_on, caplog):
 
     jpeg = make_test_jpeg_bytes(text="")
     with patch("backend.app.modules.vision_pipeline._get_paddle_ocr", return_value=None):
-        with patch("backend.app.modules.vision_pipeline.cv2.imread") as imread:
+        with patch("backend.app.modules.vision_pipeline._load_image_bgr") as loader:
             import numpy as np
 
-            imread.return_value = np.zeros((40, 40, 3), dtype=np.uint8)
+            loader.return_value = np.zeros((40, 40, 3), dtype=np.uint8)
             r = client.post(
                 "/api/scan/upload",
                 files=[("files", ("z.jpg", BytesIO(jpeg), "image/jpeg"))],
@@ -85,10 +85,10 @@ def test_vlm_http_error_logged(client, vlm_on, caplog):
 
     jpeg = make_test_jpeg_bytes()
     with patch("backend.app.modules.vision_pipeline._get_paddle_ocr", return_value=None):
-        with patch("backend.app.modules.vision_pipeline.cv2.imread") as imread:
+        with patch("backend.app.modules.vision_pipeline._load_image_bgr") as loader:
             import numpy as np
 
-            imread.return_value = np.zeros((30, 30, 3), dtype=np.uint8)
+            loader.return_value = np.zeros((30, 30, 3), dtype=np.uint8)
             r = client.post(
                 "/api/scan/upload",
                 files=[("files", ("z.jpg", BytesIO(jpeg), "image/jpeg"))],

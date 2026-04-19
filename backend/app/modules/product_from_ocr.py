@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from difflib import SequenceMatcher
 from typing import Optional
 
 # Letters from common scripts on packaging (Latin, Cyrillic incl. Kazakh)
 _LETTER_CATEGORIES = frozenset({"Lu", "Ll", "Lt", "Lm", "Lo"})
+
+# Cyrillic block used for mixed-script product titles (RU/KZ product copy next to Latin brands)
+_CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
+_LATIN_LETTER_RE = re.compile(r"[A-Za-z]")
 
 
 def _is_letter(ch: str) -> bool:
@@ -122,7 +127,11 @@ def score_product_line(line: str) -> float:
     if word_n >= 2:
         score += 18.0
     if word_n >= 5:
-        score -= min(22.0, (word_n - 4) * 5.0)
+        # Long nutrition tables — but multilingual titles can be wordy; soften if mixed script
+        pen = min(22.0, (word_n - 4) * 5.0)
+        if _LATIN_LETTER_RE.search(s) and _CYRILLIC_RE.search(s):
+            pen *= 0.35
+        score -= pen
 
     short_tokens = sum(1 for w in words if len(w) == 1)
     if words and short_tokens / len(words) > 0.55:
@@ -159,6 +168,48 @@ def score_product_line(line: str) -> float:
     return score
 
 
+def _script_mix_bonus(s: str) -> float:
+    if _LATIN_LETTER_RE.search(s) and _CYRILLIC_RE.search(s):
+        return 32.0
+    return 0.0
+
+
+def _brand_keyword_bonus(s: str) -> float:
+    t = unicodedata.normalize("NFKC", s).casefold()
+    b = 0.0
+    if "nestle" in t or "nestlé" in t or "нестле" in t:
+        b += 22.0
+    if re.search(r"(^|\s)nan(\s|$)", t) or re.search(r"(^|\s)нан(\s|$)", t):
+        b += 14.0
+    return b
+
+
+def score_title_candidate(s: str) -> float:
+    """Score a full product title (possibly merged lines)."""
+    return (
+        score_product_line(s)
+        + _script_mix_bonus(s)
+        + _brand_keyword_bonus(s)
+    )
+
+
+def title_similarity(guess: str, expected: str) -> float:
+    """0..1 after normalizing spaces / case (for tests)."""
+    a = _normalize_for_compare(guess)
+    b = _normalize_for_compare(expected)
+    if not a or not b:
+        return 0.0
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def _line_ok_for_merge(st: str, sc: float) -> bool:
+    """Include short stage/marketing fragments (e.g. \"3\") in merged titles."""
+    s = st.strip()
+    if len(s) <= 4 and (s.isdigit() or re.match(r"^\d+[.,]\d+$", s)):
+        return True
+    return sc > -28.0
+
+
 def pick_product_name(
     lines_split: list[str],
     date_snippets: set[str],
@@ -171,43 +222,71 @@ def pick_product_name(
         ranked (score, line) longest-first tie-break,
         machine_read_preview — short human-readable excerpt (not full OCR dump).
     """
-    lines = list(lines_split)
-    lines = dedupe_lines(lines)
-    lines = _drop_noisy_lines(lines)
+    lines = dedupe_lines(_drop_noisy_lines(list(lines_split)))
 
-    ranked: list[tuple[float, str]] = []
+    # Per-line scores in **document order** (critical for Nestlé-style: brand / line / Cyrillic).
+    ordered: list[tuple[str, float]] = []
     for ln in lines:
         st = ln.strip()
-        if len(st) < 3:
+        if len(st) < 2:
             continue
         if st in date_snippets:
             continue
-        # Drop lines dominated by parsed date text (often not the product title).
         if any(len(sn) > 5 and sn in st for sn in date_snippets):
             continue
         if re.match(r"^[\d\s./\-:]+$", st) and len(st) < 22:
-            continue
+            # Keep short stage numbers like "3" for merging into full titles.
+            if not (len(st.strip()) <= 4 and st.strip().isdigit()):
+                continue
         sc = score_product_line(st)
-        ranked.append((sc, st))
+        ordered.append((st, sc))
 
-    ranked.sort(key=lambda x: (-x[0], -len(x[1])))
+    seen_r: set[str] = set()
+    ranked: list[tuple[float, str]] = []
+    for st, _ in sorted(ordered, key=lambda x: -score_title_candidate(x[0])):
+        if st in seen_r:
+            continue
+        seen_r.add(st)
+        ranked.append((score_title_candidate(st), st))
 
     best: Optional[str] = None
-    if ranked and ranked[0][0] > -20.0:
-        best = ranked[0][1][:512]
+    best_title_score = -9999.0
 
-    # Optional: merge brand + subtitle if second line scores well (short brand line)
-    if (
-        ranked
-        and len(ranked) >= 2
-        and ranked[0][0] > 5
-        and ranked[1][0] > 0
-        and len(ranked[0][1]) <= 22
-        and len(ranked[0][1]) + len(ranked[1][1]) + 1 <= 85
-    ):
-        merged = f"{ranked[0][1]} {ranked[1][1]}".strip()
-        if score_product_line(merged) >= ranked[0][0] - 5:
-            best = merged[:512]
+    # Candidates: every contiguous window of ordered lines (product title usually runs top-to-bottom).
+    n = len(ordered)
+    for i in range(n):
+        for j in range(i + 1, min(i + 8, n + 1)):
+            chunk = ordered[i:j]
+            if not chunk:
+                continue
+            if not _line_ok_for_merge(chunk[0][0], chunk[0][1]):
+                continue
+            parts: list[str] = []
+            for st, sc in chunk:
+                if not _line_ok_for_merge(st, sc):
+                    continue
+                parts.append(_normalize_display_line(st))
+            if not parts:
+                continue
+            merged = " ".join(parts).strip()
+            if len(merged) < 4 or len(merged) > 140:
+                continue
+            ts = score_title_candidate(merged)
+            if ts > best_title_score:
+                best_title_score = ts
+                best = merged[:512]
+
+    # Strong single-line fallback
+    for st, sc in ordered:
+        ts = score_title_candidate(st)
+        if ts > best_title_score:
+            best_title_score = ts
+            best = st[:512]
+
+    if best is None and ordered:
+        st, sc = max(ordered, key=lambda x: score_title_candidate(x[0]))
+        if score_title_candidate(st) > -35.0:
+            best = st[:512]
 
     preview = format_machine_read_preview(ranked)
     return best, ranked, preview

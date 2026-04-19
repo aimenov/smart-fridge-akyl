@@ -1,6 +1,24 @@
 """Product name extraction from noisy OCR."""
 
-from backend.app.modules.product_from_ocr import expand_ocr_lines, pick_product_name, score_product_line
+from backend.app.modules.product_from_ocr import (
+    expand_ocr_lines,
+    pick_product_name,
+    score_product_line,
+    title_similarity,
+)
+
+
+def test_nestle_nan_multiline_merge_matches_expected_title():
+    """Regression: Lat brand + NAN + Cyrillic descriptor + stage on separate OCR lines."""
+    txt = """Nestle
+NAN
+На козьем молоке
+3"""
+    lines = expand_ocr_lines(txt)
+    name, _, _ = pick_product_name(lines, set())
+    assert name is not None
+    expected = "Nestle NAN На козьем молоке 3"
+    assert title_similarity(name, expected) >= 0.88
 
 
 def test_prefers_clean_brand_over_junk_wall():
