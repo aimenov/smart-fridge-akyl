@@ -100,18 +100,47 @@ function playDoneSound() {
   }
 }
 
+function formatFetchError(err) {
+  const m = err && err.message ? String(err.message) : String(err);
+  if (
+    m === "Load failed" ||
+    m === "Failed to fetch" ||
+    /networkerror|load failed/i.test(m)
+  ) {
+    return [
+      "Could not complete the request (connection dropped before a response).",
+      "Typical causes: OCR still running on the PC (wait longer—first PaddleOCR load can take 1–2 minutes), Wi‑Fi/firewall blocking the port, or the server process crashed.",
+      "Check the terminal running smart-fridge for Python/OpenCV errors.",
+    ].join(" ");
+  }
+  return m;
+}
+
 async function api(path, opts = {}) {
-  const r = await fetch(API + path, {
-    headers: opts.body instanceof FormData ? {} : { "Content-Type": "application/json" },
-    ...opts,
-  });
+  let r;
+  try {
+    r = await fetch(API + path, {
+      headers: opts.body instanceof FormData ? {} : { "Content-Type": "application/json" },
+      ...opts,
+    });
+  } catch (e) {
+    throw new Error(formatFetchError(e));
+  }
   if (!r.ok) {
     const t = await r.text();
     throw new Error(t || r.statusText);
   }
   if (r.status === 204) return null;
   const ct = r.headers.get("content-type") || "";
-  if (ct.includes("application/json")) return r.json();
+  if (ct.includes("application/json")) {
+    try {
+      return await r.json();
+    } catch (e) {
+      throw new Error(
+        `Invalid JSON from ${path}: ${formatFetchError(e)}`,
+      );
+    }
+  }
   return r.text();
 }
 
@@ -196,7 +225,7 @@ async function runScanFlow() {
   status.textContent = "capturing frames…";
   const blobs = await captureFrames(3);
 
-  status.textContent = "reading date…";
+  status.textContent = "uploading & reading date… (first scan can take 1–2 min)";
   const fd = new FormData();
   blobs.forEach((b, i) => fd.append("files", b, `frame-${i}.jpg`));
 
@@ -416,9 +445,11 @@ function renderPage() {
         </select></label>
         <button class="primary" id="btn-confirm">Save to inventory</button>
       </section>`;
-    document.getElementById("btn-scan").onclick = () => runScanFlow().catch((e) => {
-      document.getElementById("scan-status").textContent = "Error: " + e.message;
-    });
+    document.getElementById("btn-scan").onclick = () =>
+      runScanFlow().catch((e) => {
+        document.getElementById("scan-status").textContent =
+          "Error: " + formatFetchError(e);
+      });
     document.getElementById("btn-stop-cam").onclick = () => stopCamera();
     document.getElementById("btn-confirm").onclick = () =>
       confirmScan().catch((e) => alert(e.message));
