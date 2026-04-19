@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     telegram_chat_id: str = ""
     telegram_poll_seconds: int = 30
 
+    vlm_enabled: bool = False
     vlm_endpoint: str = "http://127.0.0.1:1234/v1/chat/completions"
 
     expiring_warning_days: int = 2

@@ -37,10 +37,11 @@ app.add_middleware(
 app.include_router(capture_router)
 app.include_router(inventory_router)
 
-if WEB_DIR.is_dir():
-    app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
-
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+if WEB_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")

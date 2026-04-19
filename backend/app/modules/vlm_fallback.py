@@ -16,7 +16,7 @@ async def describe_product_and_expiry(image_paths: list[Path]) -> Optional[dict[
     Call a local VLM when PaddleOCR + heuristics are insufficient.
     Expects an OpenAI-compatible `/v1/chat/completions` with vision content support.
     """
-    if not settings.vlm_endpoint:
+    if not settings.vlm_enabled or not settings.vlm_endpoint:
         return None
     # Minimal placeholder payload — extend with real multimodal messages for your runtime.
     parts: list[dict[str, Any]] = []
