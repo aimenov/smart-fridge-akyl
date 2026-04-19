@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     vlm_enabled: bool = False
     vlm_endpoint: str = "http://127.0.0.1:1234/v1/chat/completions"
     vlm_confidence_below: float = 0.50
+    #: Max chars of redacted JSON to log at INFO for VLM request/response previews.
+    vlm_log_preview_chars: int = 4000
 
     expiring_warning_days: int = 2
     duplicate_scan_window_seconds: int = 120

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import time
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -12,6 +14,7 @@ from backend.app.models.entities import DateType, ItemLocation, ScanRecord
 from backend.app.modules import inventory_service, vision_pipeline
 from backend.app.modules import vlm_fallback
 from backend.app.modules.inventory_service import CONFIDENCE_HIGH, CONFIDENCE_MEDIUM
+from backend.app.observability import begin_trace, end_trace, trace_prefix
 
 from backend.app.schemas.dto import (
     ConfirmScanRequest,
@@ -38,58 +41,83 @@ async def upload_scan(
     files: list[UploadFile] = File(...),
     db: Session = Depends(get_db),
 ):
-    chunks: list[tuple[str, bytes]] = []
-    for f in files[:5]:
-        raw = await f.read()
-        if raw:
-            chunks.append((f.filename or "frame.jpg", raw))
-    logger.info("scan upload: accepted %d non-empty frame(s)", len(chunks))
-    paths = vision_pipeline.persist_frames(chunks)
-    result = vision_pipeline.run_pipeline(paths)
-    logger.info(
-        "vision pipeline conf=%.3f tier=%s barcode=%s date=%s",
-        result.confidence,
-        result.stages.get("tier"),
-        result.barcode,
-        result.normalized_date,
-    )
+    trace_token = begin_trace(str(uuid.uuid4()))
+    t_request = time.perf_counter()
+    try:
+        chunks: list[tuple[str, bytes]] = []
+        for f in files[:5]:
+            raw = await f.read()
+            if raw:
+                chunks.append((f.filename or "frame.jpg", raw))
+        total_bytes = sum(len(c[1]) for c in chunks)
+        logger.info(
+            "%sPOST /api/scan/upload start | frames=%d total_bytes=%d vlm_enabled=%s vlm_threshold=%.2f",
+            trace_prefix(),
+            len(chunks),
+            total_bytes,
+            settings.vlm_enabled,
+            settings.vlm_confidence_below,
+        )
+        paths = vision_pipeline.persist_frames(chunks)
+        result = vision_pipeline.run_pipeline(paths)
+        logger.info(
+            "%sOCR path result: conf=%.3f tier=%s barcode=%s date=%s",
+            trace_prefix(),
+            result.confidence,
+            result.stages.get("tier"),
+            result.barcode,
+            result.normalized_date,
+        )
 
-    if settings.vlm_enabled and result.confidence < settings.vlm_confidence_below:
-        raw_resp = await vlm_fallback.describe_product_and_expiry(paths)
-        before = result.confidence
-        result = vlm_fallback.merge_pipeline_with_vlm(result, raw_resp)
-        logger.info("post-VLM confidence %.3f -> %.3f", before, result.confidence)
+        if settings.vlm_enabled and result.confidence < settings.vlm_confidence_below:
+            raw_resp = await vlm_fallback.describe_product_and_expiry(paths)
+            before = result.confidence
+            result = vlm_fallback.merge_pipeline_with_vlm(result, raw_resp)
+            logger.info(
+                "%sAfter VLM: confidence %.3f -> %.3f",
+                trace_prefix(),
+                before,
+                result.confidence,
+            )
 
-    scan = ScanRecord(
-        captured_image_paths=[str(p) for p in paths],
-        ocr_text=result.raw_ocr_text,
-        model_outputs={"barcode": result.barcode},
-        pipeline_stages=result.stages,
-        parsed_date_type=result.date_type if result.date_type != DateType.unknown else None,
-        raw_date_text=result.raw_date_text,
-        normalized_date=result.normalized_date,
-        confidence=result.confidence,
-    )
-    db.add(scan)
-    db.flush()
+        scan = ScanRecord(
+            captured_image_paths=[str(p) for p in paths],
+            ocr_text=result.raw_ocr_text,
+            model_outputs={"barcode": result.barcode},
+            pipeline_stages=result.stages,
+            parsed_date_type=result.date_type if result.date_type != DateType.unknown else None,
+            raw_date_text=result.raw_date_text,
+            normalized_date=result.normalized_date,
+            confidence=result.confidence,
+        )
+        db.add(scan)
+        db.flush()
 
-    product_guess = ProductCreate(
-        canonical_name=result.product_name_guess or "Unknown product",
-        barcode=result.barcode,
-    )
+        product_guess = ProductCreate(
+            canonical_name=result.product_name_guess or "Unknown product",
+            barcode=result.barcode,
+        )
 
-    return ScanUploadResponse(
-        scan_id=scan.id,
-        stage="done",
-        confidence=result.confidence,
-        confidence_tier=_tier(result.confidence),
-        product_guess=product_guess,
-        date_type=result.date_type.value if result.date_type else None,
-        raw_date_text=result.raw_date_text,
-        normalized_date=result.normalized_date,
-        barcode=result.barcode,
-        pipeline=result.stages,
-    )
+        return ScanUploadResponse(
+            scan_id=scan.id,
+            stage="done",
+            confidence=result.confidence,
+            confidence_tier=_tier(result.confidence),
+            product_guess=product_guess,
+            date_type=result.date_type.value if result.date_type else None,
+            raw_date_text=result.raw_date_text,
+            normalized_date=result.normalized_date,
+            barcode=result.barcode,
+            pipeline=result.stages,
+        )
+    finally:
+        elapsed = time.perf_counter() - t_request
+        logger.info(
+            "%sPOST /api/scan/upload finished in %.2fs (DB record id above in response scan_id)",
+            trace_prefix(),
+            elapsed,
+        )
+        end_trace(trace_token)
 
 
 @router.post("/scan/confirm", response_model=ItemOut)

@@ -12,22 +12,28 @@ import cv2
 import numpy as np
 
 from backend.app.config import settings
-
-logger = logging.getLogger(__name__)
 from backend.app.models.entities import DateType
 from backend.app.modules import date_parse
 from backend.app.modules.inventory_service import CONFIDENCE_HIGH, CONFIDENCE_MEDIUM
+from backend.app.observability import trace_prefix
+
+logger = logging.getLogger(__name__)
 
 
-def _try_paddle_ocr(images: list[np.ndarray]) -> tuple[str, float]:
+def _try_paddle_ocr(images: list[np.ndarray]) -> tuple[str, float, float]:
+    """
+    Returns (text, mean_line_confidence, wall_time_seconds).
+    When PaddleOCR is not installed, returns ("", 0.0, 0.0) quickly.
+    """
+    t0 = time.perf_counter()
     try:
         from paddleocr import PaddleOCR  # type: ignore
     except ImportError:
-        return "", 0.0
+        return "", 0.0, time.perf_counter() - t0
     try:
         ocr = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
     except Exception:
-        return "", 0.0
+        return "", 0.0, time.perf_counter() - t0
     chunks: list[str] = []
     confidences: list[float] = []
     try:
@@ -41,10 +47,10 @@ def _try_paddle_ocr(images: list[np.ndarray]) -> tuple[str, float]:
                 chunks.append(text)
                 confidences.append(conf)
     except Exception:
-        return "\n".join(chunks), 0.0
+        return "\n".join(chunks), 0.0, time.perf_counter() - t0
     text = "\n".join(chunks)
     avg = sum(confidences) / len(confidences) if confidences else 0.0
-    return text, avg
+    return text, avg, time.perf_counter() - t0
 
 
 def _decode_barcodes(bgr: np.ndarray) -> list[str]:
@@ -111,14 +117,17 @@ class PipelineResult:
 def run_pipeline(image_paths: list[Path]) -> PipelineResult:
     t0 = time.perf_counter()
     stages: dict[str, Any] = {}
+    timing_ms: dict[str, float] = {}
     barcodes: list[str] = []
     all_ocr_chunks: list[str] = []
     paddle_conf = 0.0
 
+    t_load0 = time.perf_counter()
     images_bgr = [cv2.imread(str(p)) for p in image_paths]
     images_bgr = [im for im in images_bgr if im is not None]
+    timing_ms["load_images"] = (time.perf_counter() - t_load0) * 1000.0
     if not images_bgr:
-        logger.warning("no decodable images from paths %s", image_paths)
+        logger.warning("%sno decodable images from paths %s", trace_prefix(), image_paths)
         return PipelineResult(
             barcode=None,
             raw_ocr_text="",
@@ -129,29 +138,44 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
             stages={"error": "no_images_loaded"},
         )
 
+    t_bc0 = time.perf_counter()
     for im in images_bgr:
         barcodes.extend(_decode_barcodes(im))
         barcodes.extend(_decode_qr(im))
+    timing_ms["barcode_qr"] = (time.perf_counter() - t_bc0) * 1000.0
 
     barcode = barcodes[0] if barcodes else None
     stages["barcodes"] = barcodes
 
+    t_prep0 = time.perf_counter()
     ocr_inputs: list[np.ndarray] = []
     for im in images_bgr:
         ocr_inputs.extend(_preprocess_variants(im))
         gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
         ocr_inputs.extend(_tiles(gray))
+    timing_ms["preprocess_tiles"] = (time.perf_counter() - t_prep0) * 1000.0
 
-    paddle_text, paddle_conf = _try_paddle_ocr(ocr_inputs)
+    paddle_text, paddle_conf, paddle_wall_s = _try_paddle_ocr(ocr_inputs)
+    timing_ms["paddle_ocr"] = paddle_wall_s * 1000.0
     all_ocr_chunks.append(paddle_text)
 
     combined = "\n".join(t for t in all_ocr_chunks if t).strip()
     stages["ocr_engine"] = "paddleocr" if paddle_conf > 0 else "none"
+    if paddle_conf > 0:
+        logger.info(
+            "%sPaddleOCR: %d line(s) read, mean_conf=%.3f, imgs=%d",
+            trace_prefix(),
+            len(combined.splitlines()),
+            paddle_conf,
+            len(ocr_inputs),
+        )
 
     lines = [ln.strip() for ln in combined.splitlines() if len(ln.strip()) > 2]
     product_guess = lines[0][:120] if lines else None
 
+    t_parse0 = time.perf_counter()
     parsed_list = date_parse.parse_dates_from_text(combined)
+    timing_ms["date_parse_heuristic"] = (time.perf_counter() - t_parse0) * 1000.0
     stages["parsed_dates"] = [(d.isoformat(), c, s) for d, c, s in parsed_list]
 
     best_date: Optional[date] = None
@@ -180,12 +204,26 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
     stages["tier"] = tier
 
     elapsed = time.perf_counter() - t0
+    timing_ms["total"] = elapsed * 1000.0
+    stages["timing_ms"] = timing_ms
+
     logger.info(
-        "vision pipeline finished in %.2fs images=%d barcodes=%d conf=%.3f",
+        "%svision specialist pipeline: total=%.2fs "
+        "(load=%.0fms barcode_qr=%.0fms preprocess=%.0fms paddle=%.0fms parse=%.0fms) "
+        "images=%d decoded=%d barcodes=%d ocr_chars=%d conf=%.3f tier=%s",
+        trace_prefix(),
         elapsed,
+        timing_ms["load_images"],
+        timing_ms["barcode_qr"],
+        timing_ms["preprocess_tiles"],
+        timing_ms["paddle_ocr"],
+        timing_ms["date_parse_heuristic"],
         len(image_paths),
+        len(images_bgr),
         len(barcodes),
+        len(combined),
         float(conf),
+        tier,
     )
 
     return PipelineResult(
