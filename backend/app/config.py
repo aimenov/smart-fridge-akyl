@@ -49,5 +49,11 @@ class Settings(BaseSettings):
     #: Full path to ``tesseract.exe`` when it is not on ``PATH`` (Windows e.g. ``C:/Program Files/Tesseract-OCR/tesseract.exe``).
     tesseract_cmd: Path | None = None
 
+    #: Optional PaddleOCR ``lang`` tried first (e.g. ``multilingual``, ``ru``). If unset, tries multilingual → ru → en.
+    ocr_lang: str | None = None
+
+    #: Tesseract ``-l`` languages (e.g. ``eng+rus`` or ``eng+rus+kaz`` if traineddata installed).
+    tesseract_langs: str = "eng+rus"
+
 
 settings = Settings()

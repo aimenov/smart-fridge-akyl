@@ -68,4 +68,6 @@ Install the **Tesseract** binary and put `tesseract` on `PATH` for the Tesseract
 
 **Blank scans / “PaddleOCR not available”:** (1) **Restart the API** after upgrading — Paddle stays off for the rest of the process after one failed init. (2) The **“Checking connectivity to the model hosters”** delay is avoided by default via **`PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK`** (see **`SMART_FRIDGE_PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK`**, default **true**). (3) On **Python 3.14**, Paddle wheels are missing — use **3.12** for Paddle or rely on **Tesseract** only.
 
+Optional env (see `backend/app/config.py`): **`SMART_FRIDGE_OCR_LANG`** (first Paddle language to try), **`SMART_FRIDGE_TESSERACT_LANGS`** (default `eng+rus` — add `+kaz` if you install Kazakh `traineddata`).
+
 The server keeps one shared Paddle model in memory when Paddle is installed. Point the phone at the **flat label** with text in focus and reasonable light.

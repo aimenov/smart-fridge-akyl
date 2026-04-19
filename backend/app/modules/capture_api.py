@@ -167,7 +167,10 @@ async def upload_scan(
             raw_date_text=result.raw_date_text,
             normalized_date=result.normalized_date,
             barcode=result.barcode,
-            ocr_text_preview=_ocr_preview(result.raw_ocr_text or ""),
+            ocr_text_preview=_ocr_preview(
+                (result.stages.get("machine_read_preview") if isinstance(result.stages, dict) else "")
+                or (result.raw_ocr_text or ""),
+            ),
             pipeline=safe_stages if isinstance(safe_stages, dict) else {},
         )
     except HTTPException:

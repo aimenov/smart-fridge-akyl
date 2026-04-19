@@ -17,6 +17,7 @@ from backend.app.config import settings
 from backend.app.models.entities import DateType
 from backend.app.modules import date_parse
 from backend.app.modules.inventory_service import CONFIDENCE_HIGH, CONFIDENCE_MEDIUM
+from backend.app.modules.product_from_ocr import expand_ocr_lines, pick_product_name
 from backend.app.observability import trace_prefix
 
 logger = logging.getLogger(__name__)
@@ -48,18 +49,32 @@ def _get_paddle_ocr():
         logger.warning("%spaddleocr package not installed — use pip install -e \".[dev]\" (Python <3.14 for Paddle wheels)", trace_prefix())
         _paddle_singleton = _MISSING
         return None
-    try:
-        _paddle_singleton = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
-        logger.info("%sPaddleOCR engine initialised (singleton)", trace_prefix())
-    except Exception:
-        logger.exception(
-            "%sPaddleOCR() failed — next scans skip Paddle until server restart; "
-            "check CUDA/Paddle install or set SMART_FRIDGE_PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=true",
-            trace_prefix(),
-        )
-        _paddle_singleton = _MISSING
-        return None
-    return _paddle_singleton
+    langs: list[str] = []
+    if settings.ocr_lang and str(settings.ocr_lang).strip():
+        langs.append(str(settings.ocr_lang).strip())
+    for fb in ("multilingual", "ru", "en"):
+        if fb not in langs:
+            langs.append(fb)
+
+    last_err: Optional[Exception] = None
+    for lang in langs:
+        try:
+            inst = PaddleOCR(use_angle_cls=True, lang=lang, show_log=False)
+            _paddle_singleton = inst
+            logger.info("%sPaddleOCR engine initialised (singleton) lang=%s", trace_prefix(), lang)
+            return inst
+        except Exception as e:
+            last_err = e
+            logger.warning("%sPaddleOCR(lang=%r) failed (%s); trying next language", trace_prefix(), lang, e)
+
+    logger.error(
+        "%sPaddleOCR() failed for all languages %r — restart after fixing install. Last error: %r",
+        trace_prefix(),
+        langs,
+        last_err,
+    )
+    _paddle_singleton = _MISSING
+    return None
 
 
 def _lines_from_paddle_result(result: Any) -> tuple[list[str], list[float]]:
@@ -223,7 +238,11 @@ def _try_tesseract_text(images_bgr: list[np.ndarray]) -> tuple[str, float, dict[
             pil = Image.fromarray(arr)
             for psm in ("--psm 6", "--psm 11"):
                 try:
-                    txt = pytesseract.image_to_string(pil, lang="eng", config=psm)
+                    txt = pytesseract.image_to_string(
+                        pil,
+                        lang=settings.tesseract_langs.replace(" ", ""),
+                        config=psm,
+                    )
                     if txt and txt.strip():
                         collected.append(txt.strip())
                 except Exception:
@@ -274,31 +293,6 @@ def _tiles(gray: np.ndarray, rows: int = 2, cols: int = 2) -> list[np.ndarray]:
             x0, x1 = c * w // cols, (c + 1) * w // cols
             tiles.append(gray[y0:y1, x0:x1])
     return tiles
-
-
-def _pick_product_line(lines: list[str], date_snippets: set[str]) -> Optional[str]:
-    """Prefer a line that looks like a product name, not only digits / dates."""
-    candidates: list[tuple[float, str]] = []
-    for ln in lines:
-        s = ln.strip()
-        if len(s) < 3:
-            continue
-        if s in date_snippets:
-            continue
-        if re.match(r"^[\d\s./\-:]+$", s) and len(s) < 18:
-            continue
-        alpha = sum(c.isalpha() for c in s)
-        alpha_ratio = alpha / max(len(s), 1)
-        if alpha_ratio >= 0.25 or alpha >= 6:
-            candidates.append((alpha_ratio * len(s), s))
-    if candidates:
-        candidates.sort(key=lambda x: -x[0])
-        return candidates[0][1][:512]
-    for ln in lines:
-        t = ln.strip()
-        if len(t) >= 4 and t not in date_snippets:
-            return t[:512]
-    return lines[0][:512].strip() if lines else None
 
 
 def _confidence_score(
@@ -441,7 +435,8 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
 
     had_ocr_engine = ocr is not None or tess_merged
 
-    lines = [ln.strip() for ln in combined.splitlines() if len(ln.strip()) > 2]
+    expanded_lines = expand_ocr_lines(combined)
+    lines = [ln for ln in expanded_lines if len(ln.strip()) > 2]
 
     t_parse0 = time.perf_counter()
     parsed_list = date_parse.parse_dates_from_text(combined)
@@ -462,7 +457,9 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
 
     norm = best_date.isoformat() if best_date else None
 
-    product_guess = _pick_product_line(lines, date_snippets)
+    product_guess, product_ranked, machine_read_preview = pick_product_name(expanded_lines, date_snippets)
+    stages["product_line_scores"] = [(round(s, 2), t[:120]) for s, t in product_ranked[:16]]
+    stages["machine_read_preview"] = machine_read_preview
 
     conf = _confidence_score(
         date_conf=date_conf,
