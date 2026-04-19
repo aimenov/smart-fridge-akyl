@@ -16,9 +16,10 @@ function cameraAccessHelp() {
   if (!window.isSecureContext && !isLocalhost()) {
     return [
       "The camera is blocked on HTTP when you open the app by network IP or hostname.",
-      "Start the server with TLS, for example: ",
+      "Start the server with TLS, for example: smart-fridge --dev-https (needs openssl in PATH), or",
       "smart-fridge --ssl-certfile cert.pem --ssl-keyfile key.pem",
-      "then open https://<this-device-ip>:8765/ and accept the self-signed certificate on your phone.",
+      "then open https://<this-PC-LAN-IP>:8765/ (not 0.0.0.0) and accept the self-signed certificate.",
+      "If the server is plain HTTP but you use https:// in the browser, uploads will fail.",
     ].join(" ");
   }
   return null;

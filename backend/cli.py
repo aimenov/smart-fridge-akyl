@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -34,8 +35,31 @@ def main(argv: list[str] | None = None) -> None:
         choices=("auto", "h11", "httptools"),
         help="Uvicorn HTTP stack (default: h11 — fewer mobile multipart issues than httptools)",
     )
+    p.add_argument(
+        "--dev-https",
+        action="store_true",
+        help=(
+            "Serve HTTPS using (or creating) data/certs/dev.pem + dev.key "
+            '(requires openssl in PATH). Use https://<ip>:port/ — matches TLS to the browser.'
+        ),
+    )
 
     args = p.parse_args(argv)
+
+    repo_root = Path(__file__).resolve().parents[1]
+
+    if args.dev_https:
+        from backend.app.dev_tls import ensure_dev_tls_pair
+
+        cert = repo_root / "data" / "certs" / "dev.pem"
+        key = repo_root / "data" / "certs" / "dev.key"
+        try:
+            ensure_dev_tls_pair(cert, key)
+        except RuntimeError as exc:
+            print(f"smart-fridge: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+        os.environ["SMART_FRIDGE_SSL_CERTFILE"] = str(cert.resolve())
+        os.environ["SMART_FRIDGE_SSL_KEYFILE"] = str(key.resolve())
 
     if args.host is not None:
         os.environ["SMART_FRIDGE_HOST"] = args.host
@@ -65,16 +89,24 @@ def main(argv: list[str] | None = None) -> None:
     if ssl_cert and ssl_key:
         ssl_kw["ssl_certfile"] = str(ssl_cert)
         ssl_kw["ssl_keyfile"] = str(ssl_key)
-        print("smart-fridge: using HTTPS (TLS certificates configured)", file=sys.stderr)
+        print(
+            "smart-fridge: TLS enabled — open https://<this-PC-LAN-address>:"
+            f"{settings.port}/ on your phone (not https://0.0.0.0). Accept the cert warning once.",
+            file=sys.stderr,
+        )
     elif ssl_cert or ssl_key:
         print(
             "smart-fridge: warning — provide both --ssl-certfile and --ssl-keyfile for HTTPS",
             file=sys.stderr,
         )
+    else:
+        from backend.app.dev_tls import print_plain_http_warning
 
-    proto = "https" if ssl_kw else "http"
+        print_plain_http_warning(settings.port)
+
+    scheme = "https" if ssl_kw else "http"
     print(
-        f"smart-fridge: starting {proto}://{settings.host}:{settings.port}/ "
+        f"smart-fridge: binding {scheme}://{settings.host}:{settings.port}/ "
         f"(reload={settings.reload}, scheduler={settings.scheduler_enabled}, "
         f"http={settings.http_protocol})",
         file=sys.stderr,

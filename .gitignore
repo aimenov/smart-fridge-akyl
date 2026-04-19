@@ -21,6 +21,7 @@ build/
 # Local data & scans
 data/scans/
 data/uploads/
+data/certs/
 .env
 .env.local
 

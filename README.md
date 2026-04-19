@@ -22,9 +22,20 @@ Same as `uvicorn backend.app.main:app --host 0.0.0.0 --port 8765`, but respects 
 | `--reload` | Dev autoreload |
 | `--log-level` | DEBUG, INFO, WARNING, ERROR |
 | `--ssl-certfile`, `--ssl-keyfile` | HTTPS (needed for **camera on a phone over LAN**) |
+| `--dev-https` | Same as HTTPS, but creates `data/certs/dev.pem` + `dev.key` with **openssl** (easiest LAN phone setup) |
 | `--no-scheduler` | Disable background jobs (tests default to this via env) |
 
+If the server logs **plain HTTP** but you open **`https://…` in the browser**, uvicorn will show `Invalid HTTP request received` (TLS handshake bytes are not HTTP). Either open **`http://…`** for desktop-only use, or run with TLS enabled so the URL scheme matches what uvicorn speaks.
+
 Example self-signed TLS (trusted warning on devices until you install your own CA):
+
+```powershell
+smart-fridge --dev-https
+```
+
+(`--dev-https` runs **openssl**; on Windows Git for Win often provides `Git\usr\bin\openssl.exe` automatically.)
+
+Or manually:
 
 ```powershell
 openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=smart-fridge"
