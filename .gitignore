@@ -24,6 +24,14 @@ data/uploads/
 .env
 .env.local
 
+# Local TLS test keys (never commit)
+*.pem
+cert.pem
+key.pem
+
+# Setuptools / editable install
+*.egg-info/
+
 # IDE
 .idea/
 .vscode/
