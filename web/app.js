@@ -74,6 +74,67 @@ let videoEl = null;
 let stream = null;
 let lastScanResult = null;
 
+/** Live two-phase scan: product lock prevents overwriting name/barcode during expiry frames. */
+let lockProductFields = false;
+let liveScanControl = null;
+
+const LIVE_SCAN_MAX_MS = 10000;
+/** Minimum gap between upload attempts (~2 fps cap; slower if the server is busy). */
+const LIVE_SCAN_MIN_GAP_MS = 450;
+
+function isProductIdentified(data) {
+  if (!data) return false;
+  const tier = data.confidence_tier || "low";
+  const bc = (data.barcode != null && String(data.barcode).trim() !== "") ? String(data.barcode).trim() : "";
+  const name = ((data.product_guess && data.product_guess.canonical_name) || "").trim();
+  if (bc) return true;
+  if (name && name !== "Unknown product") {
+    if (tier === "high") return true;
+    if (tier === "medium" && name.length >= 3) return true;
+  }
+  return false;
+}
+
+function isExpiryIdentified(data) {
+  if (!data) return false;
+  const exp = data.normalized_date;
+  if (!exp || String(exp).trim() === "") return false;
+  const tier = data.confidence_tier || "low";
+  if (tier === "high" || tier === "medium") return true;
+  return false;
+}
+
+function scanConfidence(data) {
+  const n = Number(data && data.confidence);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function setLiveRing(state) {
+  const wrap = document.getElementById("scan-video-wrap");
+  if (!wrap) return;
+  wrap.classList.remove("live-ring--idle", "live-ring--scanning", "live-ring--success", "live-ring--error");
+  wrap.classList.add(
+    state === "scanning"
+      ? "live-ring--scanning"
+      : state === "success"
+        ? "live-ring--success"
+        : state === "error"
+          ? "live-ring--error"
+          : "live-ring--idle",
+  );
+}
+
+function setLiveButtons({ scanning }) {
+  const start = document.getElementById("btn-start-scan");
+  const stop = document.getElementById("btn-stop-live");
+  if (start) start.disabled = !!scanning;
+  if (stop) stop.classList.toggle("hidden", !scanning);
+}
+
+function stopLiveScan() {
+  if (liveScanControl) liveScanControl.stopped = true;
+}
+
 function el(html) {
   const t = document.createElement("template");
   t.innerHTML = html.trim();
@@ -176,6 +237,282 @@ function wireConfirmHeroSync() {
     ex.addEventListener("change", sync);
     ex.addEventListener("input", sync);
   }
+}
+
+let bestExpiryConf = -1;
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function captureSingleFrame() {
+  const video = videoEl;
+  const canvas = document.getElementById("snap-canvas");
+  const ctx = canvas.getContext("2d");
+  await waitVideoReady(video);
+  const w = video.videoWidth;
+  const h = video.videoHeight;
+  canvas.width = w;
+  canvas.height = h;
+  ctx.drawImage(video, 0, 0, w, h);
+  const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.8));
+  if (!blob || blob.size < 100) {
+    throw new Error("Captured frame was empty — hold steady and try again.");
+  }
+  return blob;
+}
+
+function applyFullScanToForm(data) {
+  const d = data || {};
+  const pg = d.product_guess || {};
+  document.getElementById("product-name").value = pg.canonical_name || "";
+  document.getElementById("barcode").value = d.barcode ?? "";
+  let exp = d.normalized_date || "";
+  if (typeof exp === "string" && exp.length > 10) exp = exp.slice(0, 10);
+  document.getElementById("expiry").value = exp;
+  document.getElementById("date-type").value = d.date_type || "";
+}
+
+function mergeExpiryFromScan(data) {
+  if (!data || !data.normalized_date) return;
+  const c = scanConfidence(data);
+  if (!(bestExpiryConf < 0 || c >= bestExpiryConf)) return;
+  bestExpiryConf = c;
+  let exp = data.normalized_date;
+  if (typeof exp === "string" && exp.length > 10) exp = exp.slice(0, 10);
+  document.getElementById("expiry").value = exp;
+  if (data.date_type) document.getElementById("date-type").value = data.date_type;
+}
+
+async function uploadScanBlob(blob) {
+  const compressed = await compressBlobForUpload(blob);
+  const fd = new FormData();
+  fd.append("files", compressed, "frame.jpg");
+  return xhrPostMultipart("/api/scan/upload", fd);
+}
+
+async function flashRingSuccess() {
+  setLiveRing("success");
+  playDoneSound();
+  await sleep(700);
+  setLiveRing("idle");
+}
+
+function heroSnapshotFromForm(scanData) {
+  const sd = scanData || {};
+  const name = document.getElementById("product-name").value.trim();
+  let exp = document.getElementById("expiry").value.trim();
+  const pgName = name || (sd.product_guess && sd.product_guess.canonical_name) || "";
+  if (typeof exp === "string" && exp.length > 10) exp = exp.slice(0, 10);
+  return {
+    ...sd,
+    product_guess: { canonical_name: pgName },
+    normalized_date: exp || sd.normalized_date,
+    confidence: sd.confidence,
+    confidence_tier: sd.confidence_tier || "low",
+    ocr_text_preview: sd.ocr_text_preview,
+  };
+}
+
+async function liveScanLoop(phase) {
+  const ctrl = { stopped: false };
+  liveScanControl = ctrl;
+  setLiveButtons({ scanning: true });
+  setLiveRing("scanning");
+
+  const t0 = Date.now();
+  if (phase === "expiry") bestExpiryConf = -1;
+
+  while (Date.now() - t0 < LIVE_SCAN_MAX_MS && !ctrl.stopped) {
+    const statusEl = document.getElementById("scan-status");
+    const remain = Math.max(0, Math.ceil((LIVE_SCAN_MAX_MS - (Date.now() - t0)) / 1000));
+    if (phase === "product") {
+      statusEl.textContent = `Live: finding product… ~${remain}s left`;
+    } else {
+      statusEl.textContent = `Live: reading expiry… ~${remain}s left`;
+    }
+
+    let data;
+    try {
+      data = await uploadScanBlob(await captureSingleFrame());
+    } catch (e) {
+      statusEl.textContent = "Error: " + formatFetchError(e);
+      await sleep(LIVE_SCAN_MIN_GAP_MS);
+      continue;
+    }
+
+    lastScanResult = data;
+
+    if (phase === "product") {
+      applyFullScanToForm(data);
+      if (isProductIdentified(data)) {
+        setLiveButtons({ scanning: false });
+        liveScanControl = null;
+        return { ok: true, stopped: false };
+      }
+    } else {
+      mergeExpiryFromScan(data);
+      fillScanHero(heroSnapshotFromForm(data));
+      if (isExpiryIdentified(data)) {
+        setLiveButtons({ scanning: false });
+        liveScanControl = null;
+        return { ok: true, stopped: false };
+      }
+    }
+
+    await sleep(LIVE_SCAN_MIN_GAP_MS);
+  }
+
+  setLiveButtons({ scanning: false });
+  liveScanControl = null;
+  return { ok: false, stopped: ctrl.stopped };
+}
+
+function setPhaseLabel(text) {
+  const el = document.getElementById("scan-phase");
+  if (el) el.textContent = text || "";
+}
+
+async function handleProductPhaseEnd(stopped) {
+  lockProductFields = false;
+  setLiveRing("error");
+  await sleep(750);
+  setLiveRing("idle");
+  setPhaseLabel(
+    stopped
+      ? "Stopped — confirm product below, then continue to expiry."
+      : "Product not detected automatically — edit below, then continue.",
+  );
+  const status = document.getElementById("scan-status");
+  status.textContent = stopped
+    ? "Scan stopped. Fix product details if needed, then tap Continue to expiry scan."
+    : "Edit product if needed, then tap Continue to expiry scan.";
+  const blank = {
+    confidence: 0,
+    confidence_tier: "low",
+    product_guess: {},
+    normalized_date: null,
+    ocr_text_preview: "",
+  };
+  if (lastScanResult) {
+    applyFullScanToForm(lastScanResult);
+    fillScanHero(lastScanResult);
+  } else {
+    fillScanHero(blank);
+  }
+  document.getElementById("confirm-panel").classList.remove("hidden");
+  document.getElementById("btn-continue-expiry").classList.remove("hidden");
+  document.getElementById("confirm-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function handleExpiryPhaseEnd(stopped) {
+  setLiveRing("error");
+  await sleep(750);
+  setLiveRing("idle");
+  setPhaseLabel(
+    stopped ? "Stopped — set expiry manually if needed." : "Expiry not read cleanly — pick the date manually.",
+  );
+  document.getElementById("scan-status").textContent = stopped
+    ? "Scan stopped. Choose the expiry date below, then save."
+    : "Choose the expiry date on the calendar, then save.";
+  finalizeConfirmPanel();
+}
+
+function finalizeConfirmPanel() {
+  setLiveRing("idle");
+  const base = lastScanResult || {};
+  fillScanHero(heroSnapshotFromForm(base));
+  document.getElementById("confirm-panel").classList.remove("hidden");
+  document.getElementById("btn-continue-expiry").classList.add("hidden");
+  document.getElementById("confirm-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function continueToExpiryAfterProductEdit() {
+  const name = document.getElementById("product-name").value.trim();
+  const bc = document.getElementById("barcode").value.trim();
+  if (!name && !bc) {
+    alert("Enter a product name or barcode before continuing.");
+    return;
+  }
+  lockProductFields = true;
+  document.getElementById("btn-continue-expiry").classList.add("hidden");
+  try {
+    await startCamera();
+    setPhaseLabel("Phase 2 — scan the expiry date.");
+    document.getElementById("scan-status").textContent = "Show the printed date to the camera.";
+    const er = await liveScanLoop("expiry");
+    if (er.ok) {
+      await flashRingSuccess();
+      setPhaseLabel("Check details and save.");
+      document.getElementById("scan-status").textContent = "Review product and expiry, then save.";
+      finalizeConfirmPanel();
+    } else {
+      await handleExpiryPhaseEnd(er.stopped);
+    }
+  } catch (e) {
+    document.getElementById("scan-status").textContent = "Error: " + formatFetchError(e);
+  }
+}
+
+async function beginFullScanFlow() {
+  const status = document.getElementById("scan-status");
+  const confirmBox = document.getElementById("confirm-panel");
+  lockProductFields = false;
+  stopLiveScan();
+  setLiveRing("idle");
+
+  try {
+    status.textContent = "Starting camera…";
+    confirmBox.classList.add("hidden");
+    const cont = document.getElementById("btn-continue-expiry");
+    if (cont) cont.classList.add("hidden");
+
+    await startCamera();
+
+    setPhaseLabel("Phase 1 — scan the product (barcode or name).");
+    const pr = await liveScanLoop("product");
+    if (pr.ok) {
+      lockProductFields = true;
+      await flashRingSuccess();
+      setPhaseLabel("Product found. Phase 2 — scan the expiry date.");
+      status.textContent = "Aim at the printed expiry / best-before date.";
+      const er = await liveScanLoop("expiry");
+      if (er.ok) {
+        await flashRingSuccess();
+        setPhaseLabel("Review and save.");
+        status.textContent = "Confirm details below, then save to inventory.";
+        finalizeConfirmPanel();
+      } else {
+        await handleExpiryPhaseEnd(er.stopped);
+      }
+    } else {
+      await handleProductPhaseEnd(pr.stopped);
+    }
+  } catch (e) {
+    setLiveRing("idle");
+    setLiveButtons({ scanning: false });
+    liveScanControl = null;
+    status.textContent = "Error: " + formatFetchError(e);
+    setPhaseLabel("");
+  }
+}
+
+function resetScanSessionAfterSave() {
+  lockProductFields = false;
+  liveScanControl = null;
+  lastScanResult = null;
+  setLiveRing("idle");
+  setPhaseLabel("");
+  document.getElementById("confirm-panel").classList.add("hidden");
+  const cont = document.getElementById("btn-continue-expiry");
+  if (cont) cont.classList.add("hidden");
+  document.getElementById("product-name").value = "";
+  document.getElementById("barcode").value = "";
+  document.getElementById("expiry").value = "";
+  document.getElementById("date-type").value = "";
+  document.getElementById("qty").value = "1";
+  document.getElementById("unit").value = "each";
+  document.getElementById("scan-status").textContent = "Saved. Tap Start scanning to add another item.";
 }
 
 /** Max longest edge (px) for upload bodies (keeps mobile uploads reliable). */
@@ -285,28 +622,6 @@ function renderNav() {
   }
 }
 
-async function captureFrames(n = 3) {
-  const video = videoEl;
-  const canvas = document.getElementById("snap-canvas");
-  const ctx = canvas.getContext("2d");
-  await waitVideoReady(video);
-  const w = video.videoWidth;
-  const h = video.videoHeight;
-  canvas.width = w;
-  canvas.height = h;
-  const blobs = [];
-  for (let i = 0; i < n; i++) {
-    ctx.drawImage(video, 0, 0, w, h);
-    const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.8));
-    if (!blob || blob.size < 100) {
-      throw new Error("Captured frame was empty — wait for the preview to stabilize and try again.");
-    }
-    blobs.push(blob);
-    await new Promise((r) => setTimeout(r, 220));
-  }
-  return blobs;
-}
-
 async function startCamera() {
   const box = document.getElementById("scan-video-box");
   if (!box) return;
@@ -333,6 +648,7 @@ async function startCamera() {
 }
 
 async function stopCamera() {
+  stopLiveScan();
   if (stream) {
     stream.getTracks().forEach((t) => t.stop());
     stream = null;
@@ -340,46 +656,11 @@ async function stopCamera() {
   }
 }
 
-async function runScanFlow() {
-  const status = document.getElementById("scan-status");
-  const confirmBox = document.getElementById("confirm-panel");
-  status.textContent = "finding product…";
-  confirmBox.classList.add("hidden");
-
-  await startCamera();
-  status.textContent = "capturing frames…";
-  const blobs = await captureFrames(3);
-
-  status.textContent = "preparing upload…";
-  const uploadBlobs = [];
-  for (let i = 0; i < blobs.length; i++) {
-    uploadBlobs.push(await compressBlobForUpload(blobs[i]));
-  }
-
-  status.textContent = "uploading & reading date… (first scan can take 1–2 min)";
-  const fd = new FormData();
-  uploadBlobs.forEach((b, i) => fd.append("files", b, `frame-${i}.jpg`));
-
-  const data = await xhrPostMultipart("/api/scan/upload", fd);
-  lastScanResult = data;
-
-  status.textContent = "Review product & expiry in the card below";
-  playDoneSound();
-
-  const pg = data.product_guess || {};
-  document.getElementById("product-name").value = pg.canonical_name || "";
-  document.getElementById("barcode").value = data.barcode ?? "";
-  let exp = data.normalized_date || "";
-  if (typeof exp === "string" && exp.length > 10) exp = exp.slice(0, 10);
-  document.getElementById("expiry").value = exp;
-  document.getElementById("date-type").value = data.date_type || "";
-
-  fillScanHero(data);
-  confirmBox.classList.remove("hidden");
-  confirmBox.scrollIntoView({ behavior: "smooth", block: "start" });
-}
-
 async function confirmScan() {
+  if (!lastScanResult || lastScanResult.scan_id == null) {
+    alert("Run a scan first so the server has a capture to attach.");
+    return;
+  }
   let qty = parseFloat(document.getElementById("qty").value || "1");
   if (!Number.isFinite(qty) || qty <= 0) qty = 1;
 
@@ -402,7 +683,7 @@ async function confirmScan() {
     method: "POST",
     body: JSON.stringify(body),
   });
-  document.getElementById("scan-status").textContent = "saved to inventory";
+  resetScanSessionAfterSave();
 }
 
 async function loadInventory() {
@@ -534,12 +815,16 @@ function renderPage() {
             ? `<div class="camera-warning" id="camera-banner"><strong>Camera on phone:</strong> ${escapeHtml(warn)}</div>`
             : `<div class="muted" id="camera-banner">Camera ready (secure context).</div>`
         }
-        <p class="muted">Captures 2–3 stills, runs barcode + OCR pipeline, then confirm.</p>
-        <div id="scan-video-box"></div>
-        <p id="scan-status" class="muted">idle</p>
+        <p class="muted">Two steps: live scan finds the product (green ring), then the expiry date (green ring). Max ~10s each step; tap Stop anytime.</p>
+        <div id="scan-video-wrap" class="scan-video-wrap live-ring--idle">
+          <div id="scan-video-box"></div>
+        </div>
+        <p id="scan-phase" class="scan-phase" aria-live="polite"></p>
+        <p id="scan-status" class="muted">Idle — tap Start scanning.</p>
         <div class="row">
-          <button class="primary" id="btn-scan">Scan</button>
-          <button class="secondary" id="btn-stop-cam">Stop camera</button>
+          <button class="primary" id="btn-start-scan">Start scanning</button>
+          <button class="secondary hidden" id="btn-stop-live" type="button">Stop scanning</button>
+          <button class="secondary" id="btn-stop-cam" type="button">Stop camera</button>
         </div>
       </section>
       <section class="panel hidden" id="confirm-panel">
@@ -577,13 +862,17 @@ function renderPage() {
           <option value="freezer">freezer</option>
           <option value="pantry">pantry</option>
         </select></label>
+        <button class="secondary hidden" id="btn-continue-expiry" type="button">Continue to expiry scan</button>
         <button class="primary" id="btn-confirm">Save to inventory</button>
       </section>`;
-    document.getElementById("btn-scan").onclick = () =>
-      runScanFlow().catch((e) => {
+    document.getElementById("btn-start-scan").onclick = () =>
+      beginFullScanFlow().catch((e) => {
         document.getElementById("scan-status").textContent = "Error: " + formatFetchError(e);
       });
+    document.getElementById("btn-stop-live").onclick = () => stopLiveScan();
     document.getElementById("btn-stop-cam").onclick = () => stopCamera();
+    document.getElementById("btn-continue-expiry").onclick = () =>
+      continueToExpiryAfterProductEdit().catch((e) => alert(e.message));
     wireConfirmHeroSync();
     document.getElementById("btn-confirm").onclick = () =>
       confirmScan().catch((e) => alert(e.message));

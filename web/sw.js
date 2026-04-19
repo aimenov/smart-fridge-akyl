@@ -1,4 +1,4 @@
-const CACHE = "smart-fridge-v4";
+const CACHE = "smart-fridge-v5";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
