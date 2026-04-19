@@ -60,10 +60,14 @@ Source: [github.com/aimenov/smart-fridge-akyl](https://github.com/aimenov/smart-
 
 ## Optional OCR
 
-Barcode/QR detection works without extra packages; **printed product names and expiry dates** need OCR. Install Paddle for practical accuracy on real packaging:
+Barcode/QR detection works without extra packages; **printed product names and expiry dates** need OCR.
+
+From the repo root:
 
 ```powershell
-pip install paddlepaddle paddleocr
+pip install ".[ocr]"
 ```
 
-The server keeps one shared Paddle model in memory (faster repeat scans). Point the phone at the **flat label** with text in focus and reasonable light.
+That pulls in **PaddleOCR** (recommended for packaging labels) plus **pytesseract** / Pillow as a fallback when Paddle is not installed or returns almost no text. For Tesseract fallback, install the **Tesseract** binary and ensure `tesseract` is on `PATH` (Windows: see [UB Mannheim builds](https://github.com/UB-Mannheim/tesseract/wiki)).
+
+The server keeps one shared Paddle model in memory when Paddle is loaded. Point the phone at the **flat label** with text in focus and reasonable light.

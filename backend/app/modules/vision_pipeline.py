@@ -140,6 +140,41 @@ def _decode_qr(bgr: np.ndarray) -> list[str]:
     return []
 
 
+def _try_tesseract_text(images_bgr: list[np.ndarray]) -> tuple[str, float]:
+    """Fallback OCR when Paddle is unavailable or nearly empty (needs ``pytesseract`` + Tesseract binary)."""
+    try:
+        import pytesseract  # type: ignore
+        from PIL import Image
+    except ImportError:
+        return "", 0.0
+
+    chunks: list[str] = []
+    for im in images_bgr[:4]:
+        try:
+            gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+            h, w = gray.shape[:2]
+            if max(h, w) < 960:
+                gray = cv2.resize(
+                    gray,
+                    (max(1, int(w * 1.85)), max(1, int(h * 1.85))),
+                    interpolation=cv2.INTER_CUBIC,
+                )
+            blur = cv2.GaussianBlur(gray, (3, 3), 0)
+            _, bw = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            pil = Image.fromarray(bw)
+            txt = pytesseract.image_to_string(pil, lang="eng", config="--psm 6")
+            if txt and txt.strip():
+                chunks.append(txt.strip())
+        except Exception:
+            logger.debug("%stesseract frame failed", trace_prefix(), exc_info=True)
+
+    text = "\n".join(chunks).strip()
+    if not text:
+        return "", 0.0
+    conf = 0.42 if len(text) >= 12 else 0.28
+    return text, conf
+
+
 def _preprocess_variants(bgr: np.ndarray) -> list[np.ndarray]:
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     variants = [gray]
@@ -198,7 +233,12 @@ def _confidence_score(
     product_guess: Optional[str],
     had_ocr_engine: bool,
 ) -> float:
-    """Blend date-parse score with OCR trust; avoid flat zero when partial signals exist."""
+    """Blend date-parse score with OCR trust; avoid flat zero when partial signals exist.
+
+    Floors ensure a decoded barcode or a substantive product line can reach **medium** tier
+    (>= CONFIDENCE_MEDIUM) without requiring a parsed expiry date — previously product-only
+    reads topped out ~0.4 and stayed "low" forever.
+    """
     text_density = min(1.0, combined_len / 200.0)
     paddle_eff = paddle_conf
     if paddle_eff <= 0.02 and combined_len >= 15:
@@ -208,15 +248,27 @@ def _confidence_score(
 
     base = date_conf * (0.42 + 0.58 * min(1.0, max(paddle_eff, 0.12)))
 
-    if barcode:
-        base = max(base, 0.42 if date_conf > 0 else 0.34)
-
     pg = (product_guess or "").strip()
+    alpha_n = sum(1 for c in pg if c.isalpha())
+
+    # Decoded barcode is a strong product anchor — always allow medium tier.
+    if barcode:
+        base = max(base, 0.58 if combined_len >= 8 else 0.55)
+
     if len(pg) >= 5:
         base = max(base, 0.18 + min(0.22, len(pg) / 120.0))
 
     if date_conf <= 0.01 and combined_len > 80 and paddle_eff > 0.2:
         base = max(base, 0.12)
+
+    # Clear product-like line from OCR → medium without needing date_conf.
+    if alpha_n >= 10 and len(pg) >= 12:
+        base = max(base, 0.54 + min(0.14, alpha_n / 180.0))
+    elif alpha_n >= 6 and len(pg) >= 8:
+        base = max(base, 0.50 + min(0.06, alpha_n / 200.0))
+
+    if had_ocr_engine and combined_len >= 45 and alpha_n >= 10:
+        base = max(base, 0.52)
 
     return float(min(1.0, max(0.0, base)))
 
@@ -288,7 +340,27 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
         timing_ms["paddle_ocr"] = 0.0
         stages["ocr_strategy"] = "none"
 
-    stages["ocr_engine"] = "paddleocr" if ocr is not None else "none"
+    tess_merged = False
+    if ocr is None or len(combined.strip()) < 15:
+        tess_text, tess_conf = _try_tesseract_text(images_bgr)
+        if tess_text.strip():
+            tess_merged = True
+            combined = (combined + "\n" + tess_text).strip() if combined.strip() else tess_text.strip()
+            paddle_conf = max(paddle_conf, tess_conf)
+            stages["ocr_tesseract_supplement"] = True
+            if ocr is not None:
+                stages["ocr_strategy"] = str(stages.get("ocr_strategy", "")) + "+tesseract"
+            else:
+                stages["ocr_strategy"] = "tesseract"
+
+    if tess_merged and ocr is not None:
+        stages["ocr_engine"] = "paddleocr+tesseract"
+    elif tess_merged:
+        stages["ocr_engine"] = "tesseract"
+    else:
+        stages["ocr_engine"] = "paddleocr" if ocr is not None else "none"
+
+    had_ocr_engine = ocr is not None or tess_merged
 
     lines = [ln.strip() for ln in combined.splitlines() if len(ln.strip()) > 2]
 
@@ -319,7 +391,7 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
         combined_len=len(combined),
         barcode=barcode,
         product_guess=product_guess,
-        had_ocr_engine=ocr is not None,
+        had_ocr_engine=had_ocr_engine,
     )
 
     stages["confidence_breakdown"] = {

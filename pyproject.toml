@@ -25,6 +25,8 @@ dependencies = [
 ocr = [
   "paddlepaddle>=3.0.0",
   "paddleocr>=3.0.0",
+  "pillow>=10.0.0",
+  "pytesseract>=0.3.10",
 ]
 dev = [
   "pytest>=8.0.0",
