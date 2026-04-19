@@ -10,12 +10,25 @@ class Settings(BaseSettings):
     scan_storage: Path = Path("./data/scans")
     uploads_storage: Path = Path("./data/uploads")
 
+    log_level: str = "INFO"
+    json_logs: bool = False
+
+    scheduler_enabled: bool = True
+
+    host: str = "0.0.0.0"
+    port: int = 8765
+    reload: bool = False
+
+    ssl_certfile: Path | None = None
+    ssl_keyfile: Path | None = None
+
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     telegram_poll_seconds: int = 30
 
     vlm_enabled: bool = False
     vlm_endpoint: str = "http://127.0.0.1:1234/v1/chat/completions"
+    vlm_confidence_below: float = 0.50
 
     expiring_warning_days: int = 2
     duplicate_scan_window_seconds: int = 120

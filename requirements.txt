@@ -10,5 +10,7 @@ apscheduler>=3.10.4
 opencv-python-headless>=4.10.0
 numpy>=2.0.0
 
+# Dev / tests: pip install -r requirements-dev.txt
+
 # Optional: specialist OCR (install separately if needed)
 # pip install paddlepaddle paddleocr

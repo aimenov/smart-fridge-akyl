@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
@@ -7,6 +8,8 @@ from typing import Optional
 from sqlalchemy.orm import Session, joinedload
 
 from backend.app.config import settings
+
+logger = logging.getLogger(__name__)
 from backend.app.models.entities import (
     AppSetting,
     DateType,
@@ -53,6 +56,7 @@ def reconcile_all_items(db: Session) -> int:
         reconcile_item_status(db, item)
         n += 1
     db.commit()
+    logger.debug("reconcile_all_items updated %d row(s)", n)
     return n
 
 
@@ -82,6 +86,7 @@ def get_or_create_product(
     )
     db.add(product)
     db.flush()
+    logger.debug("created product id=%s name=%r", product.id, product.canonical_name)
     return product
 
 
@@ -139,6 +144,12 @@ def create_item_from_confirm(
         item.quantity += quantity
         scan.item_id = item.id
         db.flush()
+        logger.info(
+            "duplicate scan merged into item_id=%s (+qty=%s reason=%s)",
+            item.id,
+            quantity,
+            dup.reason,
+        )
         return item, dup
 
     item = Item(
@@ -154,6 +165,13 @@ def create_item_from_confirm(
     db.flush()
     scan.item_id = item.id
     db.flush()
+    logger.info(
+        "created item id=%s product_id=%s expiry=%s location=%s",
+        item.id,
+        product.id,
+        expiry_date,
+        location,
+    )
     return item, None
 
 

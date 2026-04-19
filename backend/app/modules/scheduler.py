@@ -38,6 +38,7 @@ async def morning_digest() -> None:
 
 def start_scheduler() -> AsyncIOScheduler:
     sched = AsyncIOScheduler(timezone="UTC")
+    logger.info("registering scheduler jobs (inventory+notify every 15m, digest 07:30 UTC)")
     sched.add_job(
         tick_inventory_and_notifications,
         "interval",

@@ -1,20 +1,26 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
+from backend.app.config import settings
 from backend.app.database import get_db
 from backend.app.models.entities import DateType, ItemLocation, ScanRecord
 from backend.app.modules import inventory_service, vision_pipeline
+from backend.app.modules import vlm_fallback
 from backend.app.modules.inventory_service import CONFIDENCE_HIGH, CONFIDENCE_MEDIUM
+
 from backend.app.schemas.dto import (
     ConfirmScanRequest,
     ItemOut,
     ProductCreate,
     ScanUploadResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["capture"])
 
@@ -37,8 +43,22 @@ async def upload_scan(
         raw = await f.read()
         if raw:
             chunks.append((f.filename or "frame.jpg", raw))
+    logger.info("scan upload: accepted %d non-empty frame(s)", len(chunks))
     paths = vision_pipeline.persist_frames(chunks)
     result = vision_pipeline.run_pipeline(paths)
+    logger.info(
+        "vision pipeline conf=%.3f tier=%s barcode=%s date=%s",
+        result.confidence,
+        result.stages.get("tier"),
+        result.barcode,
+        result.normalized_date,
+    )
+
+    if settings.vlm_enabled and result.confidence < settings.vlm_confidence_below:
+        raw_resp = await vlm_fallback.describe_product_and_expiry(paths)
+        before = result.confidence
+        result = vlm_fallback.merge_pipeline_with_vlm(result, raw_resp)
+        logger.info("post-VLM confidence %.3f -> %.3f", before, result.confidence)
 
     scan = ScanRecord(
         captured_image_paths=[str(p) for p in paths],
@@ -74,6 +94,13 @@ async def upload_scan(
 
 @router.post("/scan/confirm", response_model=ItemOut)
 def confirm_scan(body: ConfirmScanRequest, db: Session = Depends(get_db)):
+    logger.info(
+        "confirm scan_id=%s product=%r qty=%s expiry=%s",
+        body.scan_id,
+        body.product.canonical_name,
+        body.quantity,
+        body.expiry_date,
+    )
     scan = db.query(ScanRecord).filter(ScanRecord.id == body.scan_id).first()
     if not scan:
         raise HTTPException(404, "scan not found")
@@ -106,7 +133,6 @@ def confirm_scan(body: ConfirmScanRequest, db: Session = Depends(get_db)):
         "duplicate_of": dup.reason if dup else None,
         "confirmed_at": datetime.now(timezone.utc).isoformat(),
     }
-    db.commit()
     db.refresh(item)
 
     return ItemOut(

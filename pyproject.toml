@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "smart-fridge"
 version = "0.1.0"
@@ -22,6 +26,34 @@ ocr = [
   "paddlepaddle>=3.0.0",
   "paddleocr>=3.0.0",
 ]
+dev = [
+  "pytest>=8.0.0",
+  "pytest-asyncio>=0.24.0",
+  "pytest-cov>=6.0.0",
+]
+
+[project.scripts]
+smart-fridge = "backend.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["backend*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = [
+  "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["backend"]
+
+[tool.coverage.report]
+omit = ["backend/cli.py"]
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:"]
 
 [tool.ruff]
 line-length = 100

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import date
@@ -10,6 +12,8 @@ import cv2
 import numpy as np
 
 from backend.app.config import settings
+
+logger = logging.getLogger(__name__)
 from backend.app.models.entities import DateType
 from backend.app.modules import date_parse
 from backend.app.modules.inventory_service import CONFIDENCE_HIGH, CONFIDENCE_MEDIUM
@@ -105,6 +109,7 @@ class PipelineResult:
 
 
 def run_pipeline(image_paths: list[Path]) -> PipelineResult:
+    t0 = time.perf_counter()
     stages: dict[str, Any] = {}
     barcodes: list[str] = []
     all_ocr_chunks: list[str] = []
@@ -113,6 +118,7 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
     images_bgr = [cv2.imread(str(p)) for p in image_paths]
     images_bgr = [im for im in images_bgr if im is not None]
     if not images_bgr:
+        logger.warning("no decodable images from paths %s", image_paths)
         return PipelineResult(
             barcode=None,
             raw_ocr_text="",
@@ -172,6 +178,15 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
     elif conf >= CONFIDENCE_MEDIUM:
         tier = "medium"
     stages["tier"] = tier
+
+    elapsed = time.perf_counter() - t0
+    logger.info(
+        "vision pipeline finished in %.2fs images=%d barcodes=%d conf=%.3f",
+        elapsed,
+        len(image_paths),
+        len(barcodes),
+        float(conf),
+    )
 
     return PipelineResult(
         barcode=barcode,

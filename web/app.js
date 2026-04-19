@@ -1,5 +1,67 @@
 const API = "";
 
+function isLocalhost() {
+  const h = location.hostname;
+  return h === "localhost" || h === "127.0.0.1" || h === "[::1]";
+}
+
+/**
+ * Mobile browsers only expose the camera in a "secure context" (HTTPS or localhost).
+ * Plain http://<lan-ip> is not secure, so getUserMedia() is blocked.
+ */
+function cameraAccessHelp() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return "This browser does not support camera access from a web app.";
+  }
+  if (!window.isSecureContext && !isLocalhost()) {
+    return [
+      "The camera is blocked on HTTP when you open the app by network IP or hostname.",
+      "Start the server with TLS, for example: ",
+      "smart-fridge --ssl-certfile cert.pem --ssl-keyfile key.pem",
+      "then open https://<this-device-ip>:8765/ and accept the self-signed certificate on your phone.",
+    ].join(" ");
+  }
+  return null;
+}
+
+async function getCameraStream() {
+  const list = [
+    { video: { facingMode: { ideal: "environment" } }, audio: false },
+    { video: { facingMode: "environment" }, audio: false },
+    { video: true, audio: false },
+  ];
+  let lastErr;
+  for (const c of list) {
+    try {
+      return await navigator.mediaDevices.getUserMedia(c);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("Could not open camera");
+}
+
+async function waitVideoReady(video) {
+  if (video.readyState >= 2 && video.videoWidth > 0) return;
+  await new Promise((resolve, reject) => {
+    const ms = 15000;
+    const t = setTimeout(() => reject(new Error("Camera preview timed out")), ms);
+    const done = () => {
+      clearTimeout(t);
+      resolve();
+    };
+    video.addEventListener("loadedmetadata", done, { once: true });
+    video.addEventListener("loadeddata", done, { once: true });
+  });
+  let n = 0;
+  while (video.videoWidth === 0 && n++ < 75) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  if (video.videoWidth === 0) {
+    throw new Error("Camera returned no picture — try HTTPS, another browser, or different lighting.");
+  }
+}
+
 const pages = [
   { id: "scan", label: "Scan" },
   { id: "inventory", label: "Inventory" },
@@ -73,6 +135,7 @@ async function captureFrames(n = 3) {
   const video = videoEl;
   const canvas = document.getElementById("snap-canvas");
   const ctx = canvas.getContext("2d");
+  await waitVideoReady(video);
   const w = video.videoWidth;
   const h = video.videoHeight;
   canvas.width = w;
@@ -81,8 +144,11 @@ async function captureFrames(n = 3) {
   for (let i = 0; i < n; i++) {
     ctx.drawImage(video, 0, 0, w, h);
     const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.85));
+    if (!blob || blob.size < 100) {
+      throw new Error("Captured frame was empty — wait for the preview to stabilize and try again.");
+    }
     blobs.push(blob);
-    await new Promise((r) => setTimeout(r, 180));
+    await new Promise((r) => setTimeout(r, 220));
   }
   return blobs;
 }
@@ -91,16 +157,25 @@ async function startCamera() {
   const box = document.getElementById("scan-video-box");
   if (!box) return;
   if (stream) return;
-  stream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: "environment" },
-    audio: false,
-  });
+  const hint = cameraAccessHelp();
+  if (hint) {
+    throw new Error(hint);
+  }
+  stream = await getCameraStream();
   videoEl = document.createElement("video");
   videoEl.autoplay = true;
+  videoEl.muted = true;
   videoEl.playsInline = true;
+  videoEl.setAttribute("playsinline", "");
   videoEl.srcObject = stream;
   box.innerHTML = "";
   box.appendChild(videoEl);
+  try {
+    await videoEl.play();
+  } catch {
+    /* some browsers need a gesture; preview may still work */
+  }
+  await waitVideoReady(videoEl);
 }
 
 async function stopCamera() {
@@ -285,9 +360,15 @@ function renderPage() {
   const pr = document.getElementById("page-root");
 
   if (activeId === "scan") {
+    const warn = cameraAccessHelp();
     pr.innerHTML = `
       <section class="panel">
         <h2>Scan item</h2>
+        ${
+          warn
+            ? `<div class="camera-warning" id="camera-banner"><strong>Camera on phone:</strong> ${escapeHtml(warn)}</div>`
+            : `<div class="muted" id="camera-banner">Camera ready (secure context).</div>`
+        }
         <p class="muted">Captures 2–3 stills, runs barcode + OCR pipeline, then confirm.</p>
         <div id="scan-video-box"></div>
         <p id="scan-status" class="muted">idle</p>

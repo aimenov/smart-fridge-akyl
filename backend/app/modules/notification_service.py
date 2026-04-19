@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
 from sqlalchemy.orm import Session, joinedload
+
+logger = logging.getLogger(__name__)
 
 from backend.app.config import settings
 from backend.app.models.entities import AppSetting, Item, ItemStatus
@@ -14,10 +17,15 @@ async def send_telegram(text: str) -> bool:
     token = settings.telegram_bot_token.strip()
     chat = settings.telegram_chat_id.strip()
     if not token or not chat:
+        logger.debug("telegram skipped: missing token or chat id")
         return False
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     async with httpx.AsyncClient(timeout=20.0) as client:
         r = await client.post(url, json={"chat_id": chat, "text": text})
+        if r.is_success:
+            logger.info("telegram message sent (%d chars)", len(text))
+        else:
+            logger.warning("telegram send failed: %s %s", r.status_code, r.text[:200])
         return r.is_success
 
 
@@ -34,6 +42,7 @@ async def notify_digest_if_needed(db: Session, *, today: Optional[date] = None) 
     chat = _chat_id_from_db(db)
     token = settings.telegram_bot_token.strip()
     if not chat or not token:
+        logger.debug("digest skipped: no telegram configuration")
         return
     day = today or datetime.now(timezone.utc).date()
     tag = f"daily-{day.isoformat()}"
@@ -93,6 +102,7 @@ async def notify_immediate_events(db: Session, *, today: Optional[date] = None) 
     chat = _chat_id_from_db(db)
     token = settings.telegram_bot_token.strip()
     if not chat or not token:
+        logger.debug("immediate alerts skipped: no telegram configuration")
         return
 
     day = today or datetime.now(timezone.utc).date()

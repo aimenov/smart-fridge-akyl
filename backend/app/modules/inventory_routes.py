@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -7,6 +9,8 @@ from backend.app.database import get_db
 from backend.app.modules import inventory_service
 from backend.app.modules.recipe_service import suggest_recipes
 from backend.app.schemas.dto import ItemOut, ItemPatch, RecipeSuggestResponse, TelegramSettingsRequest
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["inventory"])
 
@@ -76,6 +80,7 @@ def list_expiring(db: Session = Depends(get_db)):
 
 @router.patch("/items/{item_id}", response_model=ItemOut)
 def patch_item_route(item_id: int, patch: ItemPatch, db: Session = Depends(get_db)):
+    logger.info("PATCH item_id=%s fields=%s", item_id, patch.model_dump(exclude_unset=True))
     kwargs = patch.model_dump(exclude_unset=True)
     opened_now = kwargs.pop("opened_now", None)
     kwargs["opened_now"] = opened_now
@@ -83,14 +88,12 @@ def patch_item_route(item_id: int, patch: ItemPatch, db: Session = Depends(get_d
     item = inventory_service.patch_item(db, item_id, **kwargs)
     if not item:
         raise HTTPException(404, "item not found")
-    db.commit()
     return _item_out(db, item_id)
 
 
 @router.post("/settings/telegram")
 def save_telegram(settings_body: TelegramSettingsRequest, db: Session = Depends(get_db)):
     inventory_service.set_telegram_chat_id(db, settings_body.chat_id)
-    db.commit()
     return {"ok": True}
 
 

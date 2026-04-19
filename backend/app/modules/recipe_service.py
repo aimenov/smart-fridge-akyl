@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -10,6 +11,8 @@ from sqlalchemy.orm import Session
 from backend.app.models.entities import ItemStatus
 from backend.app.modules.inventory_service import list_items_with_product
 from backend.app.schemas.dto import PantryLine, RecipeOut, RecipeSuggestResponse
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -126,6 +129,14 @@ def suggest_recipes(db: Session, *, include_expired: bool = False) -> RecipeSugg
         "Expired items are excluded from suggestions."
         if not include_expired
         else "Expired items are included because you asked for them."
+    )
+
+    logger.debug(
+        "recipe suggest pantry=%d can=%d extra=%d expiring=%d",
+        len(pantry_names),
+        len(can_cook),
+        len(need_extra),
+        len(expiring_best),
     )
 
     return RecipeSuggestResponse(
