@@ -1,0 +1,32 @@
+[
+  {
+    "id": "scrambled-eggs",
+    "title": "Scrambled eggs",
+    "ingredients": ["eggs", "butter", "milk", "salt"],
+    "prep_minutes": 8
+  },
+  {
+    "id": "pasta-cream",
+    "title": "Creamy pasta",
+    "ingredients": ["pasta", "cream", "garlic", "parmesan"],
+    "prep_minutes": 25
+  },
+  {
+    "id": "yogurt-bowl",
+    "title": "Yogurt fruit bowl",
+    "ingredients": ["yogurt", "berries", "honey"],
+    "prep_minutes": 5
+  },
+  {
+    "id": "spinach-soup",
+    "title": "Quick spinach soup",
+    "ingredients": ["spinach", "cream", "vegetable stock", "onion"],
+    "prep_minutes": 20
+  },
+  {
+    "id": "omelette",
+    "title": "Cheese omelette",
+    "ingredients": ["eggs", "cheese", "butter", "milk"],
+    "prep_minutes": 12
+  }
+]
