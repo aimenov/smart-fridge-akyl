@@ -1,0 +1,163 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+:root {
+  font-family: "Segoe UI", system-ui, sans-serif;
+  color: #0f172a;
+  background: #ecfdf9;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  padding: 0.75rem 1rem;
+  background: linear-gradient(135deg, #0f766e, #0ea5e9);
+  color: #f8fafc;
+  box-shadow: 0 4px 20px rgba(15, 118, 110, 0.35);
+}
+
+.topbar h1 {
+  margin: 0 0 0.75rem;
+  font-size: 1.35rem;
+  font-weight: 650;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.tabs button {
+  border: none;
+  border-radius: 999px;
+  padding: 0.45rem 0.85rem;
+  background: rgba(255, 255, 255, 0.22);
+  color: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tabs button.active {
+  background: #f8fafc;
+  color: #0f766e;
+}
+
+#page-root {
+  padding: 1rem;
+  max-width: 720px;
+  margin: 0 auto 3rem;
+}
+
+.panel {
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+  box-shadow: 0 10px 40px rgba(15, 23, 42, 0.08);
+}
+
+.panel h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1.1rem;
+}
+
+video {
+  width: 100%;
+  border-radius: 12px;
+  background: #0f172a;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+button.primary {
+  border: none;
+  border-radius: 12px;
+  padding: 0.65rem 1rem;
+  background: #0f766e;
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button.secondary {
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  padding: 0.65rem 1rem;
+  background: #fff;
+  cursor: pointer;
+}
+
+.status-pill {
+  display: inline-block;
+  padding: 0.25rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.status-pill.high {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.status-pill.medium {
+  background: #fef9c3;
+  color: #854d0e;
+}
+
+.status-pill.low {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+label.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-bottom: 0.65rem;
+  font-size: 0.9rem;
+}
+
+input,
+select {
+  border-radius: 10px;
+  border: 1px solid #cbd5e1;
+  padding: 0.5rem 0.65rem;
+  font-size: 1rem;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.card {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 0.75rem;
+}
+
+.muted {
+  color: #64748b;
+  font-size: 0.9rem;
+}
+
+.hidden {
+  display: none !important;
+}
