@@ -68,7 +68,7 @@ Install the **Tesseract** binary and put `tesseract` on `PATH` for the Tesseract
 
 **Blank scans / “PaddleOCR not available”:** (1) **Restart the API** after upgrading — Paddle stays off for the rest of the process after one failed init. (2) The **“Checking connectivity to the model hosters”** delay is avoided by default via **`PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK`** (see **`SMART_FRIDGE_PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK`**, default **true**). (3) On **Python 3.14**, Paddle wheels are missing — use **3.12** for Paddle or rely on **Tesseract** only.
 
-Optional env (see `backend/app/config.py`): **`SMART_FRIDGE_OCR_LANG`** (first Paddle language to try), **`SMART_FRIDGE_TESSERACT_LANGS`** (default `eng+rus` — add `+kaz` if you install Kazakh `traineddata`).
+Optional env (see `backend/app/config.py`): **`SMART_FRIDGE_OCR_LANG`** (first Paddle language — pipeline tries **`ru`** then **`multilingual`** then **`en`** for Cyrillic packaging). **`SMART_FRIDGE_TESSERACT_LANGS`** defaults to **`rus+eng`**; the fallback chain also tries **`rus`** and **`eng+rus`**. Cyrillic requires **Russian language data** next to Tesseract (`rus.traineddata`; the UB Mannheim Windows installer includes it). Add **`+kaz`** if you install Kazakh traineddata.
 
 Regression image (optional): put **`tests/integration/fixtures/Nestle NAN На козьем молоке 3.jpg`** in the repo and run `pytest tests/integration/test_nestle_label_fixture.py -m integration` to verify OCR + product-title extraction against that label.
 

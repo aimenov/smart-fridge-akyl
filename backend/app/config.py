@@ -52,8 +52,9 @@ class Settings(BaseSettings):
     #: Optional PaddleOCR ``lang`` tried first (e.g. ``multilingual``, ``ru``). If unset, tries multilingual → ru → en.
     ocr_lang: str | None = None
 
-    #: Tesseract ``-l`` languages (e.g. ``eng+rus`` or ``eng+rus+kaz`` if traineddata installed).
-    tesseract_langs: str = "eng+rus"
+    #: First Tesseract ``-l`` tried; then built-in fallbacks (``rus+eng``, ``rus``, …) until one works.
+    #: Cyrillic needs ``rus.traineddata`` next to Tesseract (Windows installer includes Russian).
+    tesseract_langs: str = "rus+eng"
 
 
 settings = Settings()

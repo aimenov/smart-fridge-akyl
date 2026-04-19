@@ -65,7 +65,8 @@ def _get_paddle_ocr():
     langs: list[str] = []
     if settings.ocr_lang and str(settings.ocr_lang).strip():
         langs.append(str(settings.ocr_lang).strip())
-    for fb in ("multilingual", "ru", "en"):
+    # Prefer Cyrillic-capable models before English-only (matches RU/KZ retail packaging).
+    for fb in ("ru", "multilingual", "en"):
         if fb not in langs:
             langs.append(fb)
 
@@ -90,25 +91,85 @@ def _get_paddle_ocr():
     return None
 
 
-def _lines_from_paddle_result(result: Any) -> tuple[list[str], list[float]]:
+def _extract_text_lines_from_paddle(result: Any) -> tuple[list[str], list[float]]:
+    """Parse PaddleOCR 2.x nested lists and 3.x ``rec_texts`` / dict batch outputs."""
     chunks: list[str] = []
     confs: list[float] = []
-    if not result or not result[0]:
+
+    def append_recognition(texts: Any, scores: Any) -> None:
+        if not texts:
+            return
+        sc_list = list(scores) if scores is not None else []
+        for i, t in enumerate(texts):
+            if t is None or (isinstance(t, str) and not t.strip()):
+                continue
+            chunks.append(str(t).strip())
+            if i < len(sc_list):
+                try:
+                    confs.append(float(sc_list[i]))
+                except (TypeError, ValueError):
+                    confs.append(1.0)
+            else:
+                confs.append(1.0)
+
+    if result is None:
         return chunks, confs
-    for line in result[0]:
-        text = line[1][0]
-        conf = float(line[1][1])
-        chunks.append(text)
-        confs.append(conf)
+
+    # PaddleOCR 3.x OCRResult / object with attributes
+    rec_texts = getattr(result, "rec_texts", None)
+    if rec_texts is not None:
+        append_recognition(rec_texts, getattr(result, "rec_scores", None))
+        if chunks:
+            return chunks, confs
+
+    if isinstance(result, dict):
+        append_recognition(result.get("rec_texts"), result.get("rec_scores"))
+        if chunks:
+            return chunks, confs
+
+    if isinstance(result, list) and result:
+        first = result[0]
+        if hasattr(first, "rec_texts"):
+            append_recognition(getattr(first, "rec_texts", None), getattr(first, "rec_scores", None))
+            if chunks:
+                return chunks, confs
+        if isinstance(first, dict):
+            append_recognition(first.get("rec_texts"), first.get("rec_scores"))
+            if chunks:
+                return chunks, confs
+        # 2.x: list[ page ] of list[ line ] of [box, (text, conf)]
+        if isinstance(first, list):
+            for line in first:
+                if line is None or len(line) < 2:
+                    continue
+                try:
+                    pair = line[1]
+                    if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+                        chunks.append(str(pair[0]).strip())
+                        confs.append(float(pair[1]))
+                except (IndexError, TypeError, ValueError):
+                    continue
+            if chunks:
+                return chunks, confs
+
     return chunks, confs
 
 
 def _run_paddle_on_gray(ocr: Any, gray: np.ndarray) -> tuple[list[str], list[float]]:
-    try:
-        result = ocr.ocr(gray, cls=True)
-        return _lines_from_paddle_result(result)
-    except Exception:
-        return [], []
+    for attempt in ("ocr", "predict"):
+        try:
+            if attempt == "ocr" and hasattr(ocr, "ocr"):
+                raw = ocr.ocr(gray, cls=True)
+            elif attempt == "predict" and hasattr(ocr, "predict"):
+                raw = ocr.predict(gray)
+            else:
+                continue
+            lines, confs = _extract_text_lines_from_paddle(raw)
+            if lines:
+                return lines, confs
+        except Exception:
+            logger.debug("%spaddle %s failed", trace_prefix(), attempt, exc_info=True)
+    return [], []
 
 
 def _full_frame_pass(ocr: Any, images_bgr: list[np.ndarray]) -> tuple[str, float]:
@@ -212,6 +273,27 @@ def _tesseract_gray_variants(gray: np.ndarray) -> list[tuple[str, np.ndarray]]:
     return out
 
 
+def _tesseract_lang_candidates() -> list[str]:
+    """Try Russian-capable bundles first — ``eng`` alone often drops Cyrillic entirely."""
+    seen: set[str] = set()
+    out: list[str] = []
+    primary = (settings.tesseract_langs or "").strip().replace(" ", "")
+    for cand in (
+        primary,
+        "rus+eng",
+        "rus",
+        "eng+rus",
+        "eng+kaz",
+        "eng+kaz+kir",
+        "eng",
+    ):
+        if not cand or cand in seen:
+            continue
+        seen.add(cand)
+        out.append(cand)
+    return out
+
+
 def _try_tesseract_text(images_bgr: list[np.ndarray]) -> tuple[str, float, dict[str, Any]]:
     """Fallback OCR when Paddle is unavailable or nearly empty (needs ``pytesseract`` + Tesseract binary)."""
     diag: dict[str, Any] = {}
@@ -244,22 +326,40 @@ def _try_tesseract_text(images_bgr: list[np.ndarray]) -> tuple[str, float, dict[
         )
         return "", 0.0, diag
 
+    lang_order = _tesseract_lang_candidates()
+    diag["tesseract_lang_order"] = lang_order
+
     collected: list[str] = []
+    psms = ("--psm 6", "--psm 11", "--psm 3", "--psm 12")
     for im in images_bgr[:3]:
         gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
         for vlabel, arr in _tesseract_gray_variants(gray):
             pil = Image.fromarray(arr)
-            for psm in ("--psm 6", "--psm 11"):
-                try:
-                    txt = pytesseract.image_to_string(
-                        pil,
-                        lang=settings.tesseract_langs.replace(" ", ""),
-                        config=psm,
-                    )
-                    if txt and txt.strip():
-                        collected.append(txt.strip())
-                except Exception:
-                    logger.debug("%stesseract %s %s failed", trace_prefix(), vlabel, psm, exc_info=True)
+            for psm in psms:
+                best_chunk = ""
+                best_lang = ""
+                for lang_code in lang_order:
+                    cfg = f"{psm} --oem 3"
+                    try:
+                        txt = pytesseract.image_to_string(pil, lang=lang_code, config=cfg)
+                        t = (txt or "").strip()
+                        if len(t) > len(best_chunk):
+                            best_chunk = t
+                            best_lang = lang_code
+                    except Exception:
+                        logger.debug(
+                            "%stesseract lang=%s %s %s failed",
+                            trace_prefix(),
+                            lang_code,
+                            vlabel,
+                            psm,
+                            exc_info=True,
+                        )
+                if best_chunk:
+                    collected.append(best_chunk)
+                    bl = diag.setdefault("tesseract_best_langs", [])
+                    if len(bl) < 16:
+                        bl.append(best_lang)
 
     # Dedupe similar chunks while keeping order
     seen: set[str] = set()
