@@ -13,19 +13,16 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
     json_logs: bool = False
-    #: When True, log every HTTP request line (method, path, client, UA) at INFO under smart_fridge.http.
-    http_trace: bool = True
-    #: When True, log static file requests too; when False, only /api/* and /health (less noise).
-    http_trace_static: bool = False
 
     scheduler_enabled: bool = True
 
     host: str = "0.0.0.0"
     port: int = 8765
     reload: bool = False
-    #: Passed to uvicorn as ``http=``. ``h11`` avoids httptools parse failures on some mobile
-    #: browsers + large multipart POSTs (symptom: ``Invalid HTTP request received``).
-    http_protocol: Literal["auto", "h11", "httptools"] = "h11"
+    http_protocol: Literal["auto", "h11", "httptools"] = "auto"
+
+    #: When True (default), CLI creates or uses data/certs/dev.pem + dev.key for LAN HTTPS.
+    dev_https: bool = True
 
     ssl_certfile: Path | None = None
     ssl_keyfile: Path | None = None

@@ -12,6 +12,14 @@ mkdir data\scans, data\uploads -Force 2>$null
 smart-fridge
 ```
 
+By default the CLI **creates or reuses** `data/certs/dev.pem` + `dev.key` (needs **openssl** on PATH; Git for Windows includes it) and serves **HTTPS**. Open **`https://<your-pc-lan-ip>:8765`** on your phone and accept the certificate warning once.
+
+Use plain HTTP only when you want (no TLS):
+
+```powershell
+smart-fridge --no-dev-https
+```
+
 Same as `uvicorn backend.app.main:app --host 0.0.0.0 --port 8765`, but respects `.env` and CLI flags.
 
 ### CLI
@@ -21,28 +29,16 @@ Same as `uvicorn backend.app.main:app --host 0.0.0.0 --port 8765`, but respects 
 | `--host`, `--port` | Bind address |
 | `--reload` | Dev autoreload |
 | `--log-level` | DEBUG, INFO, WARNING, ERROR |
-| `--ssl-certfile`, `--ssl-keyfile` | HTTPS (needed for **camera on a phone over LAN**) |
-| `--dev-https` | Same as HTTPS, but creates `data/certs/dev.pem` + `dev.key` with **openssl** (easiest LAN phone setup) |
+| `--ssl-certfile`, `--ssl-keyfile` | Your own PEM files (skip auto dev cert) |
+| `--no-dev-https` | Plain HTTP only — no auto certificate |
 | `--no-scheduler` | Disable background jobs (tests default to this via env) |
 
-If the server logs **plain HTTP** but you open **`https://…` in the browser**, uvicorn will show `Invalid HTTP request received` (TLS handshake bytes are not HTTP). Either open **`http://…`** for desktop-only use, or run with TLS enabled so the URL scheme matches what uvicorn speaks.
-
-Example self-signed TLS (trusted warning on devices until you install your own CA):
-
-```powershell
-smart-fridge --dev-https
-```
-
-(`--dev-https` runs **openssl**; on Windows Git for Win often provides `Git\usr\bin\openssl.exe` automatically.)
-
-Or manually:
+Manual certificate example:
 
 ```powershell
 openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=smart-fridge"
 smart-fridge --ssl-certfile cert.pem --ssl-keyfile key.pem
 ```
-
-Open `https://<your-pc-lan-ip>:8765` on the phone, accept the certificate, then use **Scan**.
 
 Browsers treat `http://192.168.x.x` as **not a secure context**, so `getUserMedia` (camera) is blocked unless you use **HTTPS** or **localhost**.
 

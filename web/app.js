@@ -1,11 +1,5 @@
 const API = "";
 
-function scanLog(phase, detail) {
-  const d = detail && typeof detail === "object" ? { ...detail } : { message: String(detail) };
-  const line = { t: new Date().toISOString(), phase, page: location.href, ...d };
-  console.info("[smart-fridge scan]", line);
-}
-
 function isLocalhost() {
   const h = location.hostname;
   return h === "localhost" || h === "127.0.0.1" || h === "[::1]";
@@ -21,11 +15,9 @@ function cameraAccessHelp() {
   }
   if (!window.isSecureContext && !isLocalhost()) {
     return [
-      "The camera is blocked on HTTP when you open the app by network IP or hostname.",
-      "Start the server with TLS, for example: smart-fridge --dev-https (needs openssl in PATH), or",
-      "smart-fridge --ssl-certfile cert.pem --ssl-keyfile key.pem",
-      "then open https://<this-PC-LAN-IP>:8765/ (not 0.0.0.0) and accept the self-signed certificate.",
-      "If the server is plain HTTP but you use https:// in the browser, uploads will fail.",
+      "The camera is blocked on HTTP when you open the app by network IP.",
+      "Run the server with HTTPS (default: dev certificate in data/certs/) or pass your own PEM files.",
+      "Open https://<this-PC-LAN-IP>:8765/ and accept the certificate warning if prompted.",
     ].join(" ");
   }
   return null;
@@ -114,22 +106,15 @@ function formatFetchError(err) {
     m === "Failed to fetch" ||
     /networkerror|load failed/i.test(m)
   ) {
-    return [
-      "Could not complete the request (connection dropped before a response).",
-      "Typical causes: OCR still running on the PC (wait longer—first PaddleOCR load can take 1–2 minutes), Wi‑Fi/firewall blocking the port, or the server process crashed.",
-      "Check the terminal running smart-fridge for Python/OpenCV errors.",
-    ].join(" ");
+    return "Network error — check Wi‑Fi, wait if OCR is still processing on the PC, and try again.";
   }
   return m;
 }
 
-/** Max longest edge (px); keeps LAN uploads small for iOS TLS + multipart reliability. */
+/** Max longest edge (px) for upload bodies (keeps mobile uploads reliable). */
 const UPLOAD_MAX_EDGE = 1600;
 const UPLOAD_JPEG_QUALITY = 0.72;
 
-/**
- * Resize JPEG blobs for upload. iOS camera frames can be huge; smaller bodies avoid WebKit failures.
- */
 async function compressBlobForUpload(blob) {
   if (!(blob instanceof Blob) || blob.size < 1) return blob;
 
@@ -157,24 +142,18 @@ async function compressBlobForUpload(blob) {
   ctx.drawImage(bitmap, 0, 0, w, h);
   bitmap.close();
 
-  const out = await new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     c.toBlob(
       (b) => (b ? resolve(b) : reject(new Error("JPEG encode failed"))),
       "image/jpeg",
       UPLOAD_JPEG_QUALITY,
     );
   });
-  scanLog("frame_resized", { beforeBytes: blob.size, afterBytes: out.size, w, h });
-  return out;
 }
 
-/**
- * iOS Safari often fails fetch() with FormData ("Load failed"); XHR multipart is reliable on WebKit.
- */
-function xhrPostMultipart(path, formData, logContext) {
+/** WebKit multipart upload: prefer XHR over fetch for large FormData on iOS Safari. */
+function xhrPostMultipart(path, formData) {
   const url = new URL(path, location.origin).href;
-  const t0 = performance.now();
-  if (logContext) scanLog("xhr_start", { path, url, ...logContext });
 
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -183,60 +162,27 @@ function xhrPostMultipart(path, formData, logContext) {
     xhr.timeout = 180000;
 
     xhr.onload = () => {
-      const rid = xhr.getResponseHeader("X-Request-ID");
-      const ms = Math.round(performance.now() - t0);
-      if (logContext) {
-        scanLog("xhr_response", {
-          path,
-          status: xhr.status,
-          requestId: rid,
-          ms,
-        });
-      }
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
           resolve(JSON.parse(xhr.responseText || "{}"));
-        } catch (e) {
-          if (logContext) scanLog("xhr_json_error", { message: String(e && e.message) });
+        } catch {
           reject(new Error(`Invalid JSON from ${path}`));
         }
       } else {
-        const body = (xhr.responseText || "").slice(0, 2000);
-        if (logContext) scanLog("xhr_http_error", { path, status: xhr.status, body });
-        reject(new Error(body || xhr.statusText || `HTTP ${xhr.status}`));
+        reject(new Error((xhr.responseText || "").slice(0, 2000) || xhr.statusText || `HTTP ${xhr.status}`));
       }
     };
 
-    xhr.onerror = () => {
-      if (logContext) {
-        scanLog("xhr_network_error", {
-          path,
-          readyState: xhr.readyState,
-          status: xhr.status,
-          ms: Math.round(performance.now() - t0),
-        });
-      }
-      reject(new Error(formatFetchError({ message: "Load failed" })));
-    };
+    xhr.onerror = () => reject(new Error(formatFetchError({ message: "Load failed" })));
 
-    xhr.ontimeout = () => {
-      if (logContext) scanLog("xhr_timeout", { path });
-      reject(
-        new Error(
-          "Upload timed out after 3 minutes — the PC may still be loading OCR models; try again.",
-        ),
-      );
-    };
+    xhr.ontimeout = () =>
+      reject(new Error("Upload timed out — the PC may still be loading OCR; try again."));
 
     xhr.send(formData);
   });
 }
 
-async function api(path, opts = {}, logContext) {
-  const t0 = performance.now();
-  if (logContext) {
-    scanLog("fetch_start", { path, ...logContext });
-  }
+async function api(path, opts = {}) {
   let r;
   try {
     r = await fetch(API + path, {
@@ -244,47 +190,15 @@ async function api(path, opts = {}, logContext) {
       ...opts,
     });
   } catch (e) {
-    if (logContext) {
-      scanLog("fetch_network_error", {
-        path,
-        name: e && e.name,
-        message: e && e.message,
-        stack: e && e.stack,
-        ms: Math.round(performance.now() - t0),
-        ...logContext,
-      });
-    }
     throw new Error(formatFetchError(e));
-  }
-  if (logContext) {
-    const rid = r.headers.get("X-Request-ID");
-    scanLog("fetch_response", {
-      path,
-      status: r.status,
-      ok: r.ok,
-      requestId: rid,
-      ms: Math.round(performance.now() - t0),
-    });
   }
   if (!r.ok) {
     const t = await r.text();
-    if (logContext) {
-      scanLog("fetch_http_error", { path, body: t.slice(0, 2000) });
-    }
     throw new Error(t || r.statusText);
   }
   if (r.status === 204) return null;
   const ct = r.headers.get("content-type") || "";
-  if (ct.includes("application/json")) {
-    try {
-      return await r.json();
-    } catch (e) {
-      if (logContext) scanLog("fetch_json_parse_error", { path, message: String(e && e.message) });
-      throw new Error(
-        `Invalid JSON from ${path}: ${formatFetchError(e)}`,
-      );
-    }
-  }
+  if (ct.includes("application/json")) return r.json();
   return r.text();
 }
 
@@ -362,12 +276,6 @@ async function stopCamera() {
 async function runScanFlow() {
   const status = document.getElementById("scan-status");
   const confirmBox = document.getElementById("confirm-panel");
-  scanLog("flow_begin", {
-    secureContext: Boolean(window.isSecureContext),
-    protocol: location.protocol,
-    host: location.host,
-    userAgent: navigator.userAgent,
-  });
   status.textContent = "finding product…";
   confirmBox.classList.add("hidden");
 
@@ -385,17 +293,7 @@ async function runScanFlow() {
   const fd = new FormData();
   uploadBlobs.forEach((b, i) => fd.append("files", b, `frame-${i}.jpg`));
 
-  let totalBytes = 0;
-  uploadBlobs.forEach((b) => {
-    totalBytes += b.size;
-  });
-  scanLog("upload_prepare", {
-    frames: uploadBlobs.length,
-    totalBytes,
-    transport: "xhr",
-  });
-
-  const data = await xhrPostMultipart("/api/scan/upload", fd, { uploadBytes: totalBytes });
+  const data = await xhrPostMultipart("/api/scan/upload", fd);
   lastScanResult = data;
 
   status.textContent = "done";
@@ -613,8 +511,7 @@ function renderPage() {
       </section>`;
     document.getElementById("btn-scan").onclick = () =>
       runScanFlow().catch((e) => {
-        document.getElementById("scan-status").textContent =
-          "Error: " + formatFetchError(e);
+        document.getElementById("scan-status").textContent = "Error: " + formatFetchError(e);
       });
     document.getElementById("btn-stop-cam").onclick = () => stopCamera();
     document.getElementById("btn-confirm").onclick = () =>

@@ -17,6 +17,7 @@ os.environ.setdefault("SMART_FRIDGE_SCHEDULER_ENABLED", "false")
 os.environ.setdefault("SMART_FRIDGE_SCAN_STORAGE", str(_root_path / "scans"))
 os.environ.setdefault("SMART_FRIDGE_UPLOADS_STORAGE", str(_root_path / "uploads"))
 os.environ.setdefault("SMART_FRIDGE_LOG_LEVEL", "WARNING")
+os.environ.setdefault("SMART_FRIDGE_DEV_HTTPS", "false")
 os.environ.setdefault("SMART_FRIDGE_VLM_ENABLED", "false")
 
 from fastapi.testclient import TestClient
