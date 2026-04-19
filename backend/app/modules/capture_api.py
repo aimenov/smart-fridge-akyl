@@ -64,6 +64,12 @@ async def upload_scan(
 ):
     trace_token = begin_trace(str(uuid.uuid4()))
     t_request = time.perf_counter()
+    logger.info(
+        "%sscan_upload multipart accepted parts=%s content_types=%s",
+        trace_prefix(),
+        len(files),
+        [getattr(f, "content_type", None) for f in files],
+    )
     try:
         chunks: list[tuple[str, bytes]] = []
         for f in files[:5]:

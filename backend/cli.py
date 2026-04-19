@@ -80,8 +80,19 @@ def main(argv: list[str] | None = None) -> None:
 
     # Import after env so Settings picks up overrides
     from backend.app.config import settings
+    from backend.app.logging_config import setup_logging
 
     import uvicorn
+
+    setup_logging(
+        settings.log_level,
+        json_logs=settings.json_logs,
+        http_trace=settings.http_trace,
+    )
+    sys.stderr.write(
+        "smart-fridge: logging initialized before uvicorn "
+        f"(level={settings.log_level}, http_trace={settings.http_trace})\n"
+    )
 
     ssl_cert = settings.ssl_certfile
     ssl_key = settings.ssl_keyfile
@@ -119,6 +130,8 @@ def main(argv: list[str] | None = None) -> None:
         reload=settings.reload,
         log_level=settings.log_level.lower(),
         http=settings.http_protocol,
+        log_config=None,
+        access_log=True,
         **ssl_kw,
     )
 

@@ -13,6 +13,10 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
     json_logs: bool = False
+    #: When True, log every HTTP request line (method, path, client, UA) at INFO under smart_fridge.http.
+    http_trace: bool = True
+    #: When True, log static file requests too; when False, only /api/* and /health (less noise).
+    http_trace_static: bool = False
 
     scheduler_enabled: bool = True
 

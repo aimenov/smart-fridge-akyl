@@ -1,5 +1,11 @@
 const API = "";
 
+function scanLog(phase, detail) {
+  const d = detail && typeof detail === "object" ? { ...detail } : { message: String(detail) };
+  const line = { t: new Date().toISOString(), phase, page: location.href, ...d };
+  console.info("[smart-fridge scan]", line);
+}
+
 function isLocalhost() {
   const h = location.hostname;
   return h === "localhost" || h === "127.0.0.1" || h === "[::1]";
@@ -117,7 +123,11 @@ function formatFetchError(err) {
   return m;
 }
 
-async function api(path, opts = {}) {
+async function api(path, opts = {}, logContext) {
+  const t0 = performance.now();
+  if (logContext) {
+    scanLog("fetch_start", { path, ...logContext });
+  }
   let r;
   try {
     r = await fetch(API + path, {
@@ -125,10 +135,33 @@ async function api(path, opts = {}) {
       ...opts,
     });
   } catch (e) {
+    if (logContext) {
+      scanLog("fetch_network_error", {
+        path,
+        name: e && e.name,
+        message: e && e.message,
+        stack: e && e.stack,
+        ms: Math.round(performance.now() - t0),
+        ...logContext,
+      });
+    }
     throw new Error(formatFetchError(e));
+  }
+  if (logContext) {
+    const rid = r.headers.get("X-Request-ID");
+    scanLog("fetch_response", {
+      path,
+      status: r.status,
+      ok: r.ok,
+      requestId: rid,
+      ms: Math.round(performance.now() - t0),
+    });
   }
   if (!r.ok) {
     const t = await r.text();
+    if (logContext) {
+      scanLog("fetch_http_error", { path, body: t.slice(0, 2000) });
+    }
     throw new Error(t || r.statusText);
   }
   if (r.status === 204) return null;
@@ -137,6 +170,7 @@ async function api(path, opts = {}) {
     try {
       return await r.json();
     } catch (e) {
+      if (logContext) scanLog("fetch_json_parse_error", { path, message: String(e && e.message) });
       throw new Error(
         `Invalid JSON from ${path}: ${formatFetchError(e)}`,
       );
@@ -219,6 +253,12 @@ async function stopCamera() {
 async function runScanFlow() {
   const status = document.getElementById("scan-status");
   const confirmBox = document.getElementById("confirm-panel");
+  scanLog("flow_begin", {
+    secureContext: Boolean(window.isSecureContext),
+    protocol: location.protocol,
+    host: location.host,
+    userAgent: navigator.userAgent,
+  });
   status.textContent = "finding product…";
   confirmBox.classList.add("hidden");
 
@@ -230,7 +270,21 @@ async function runScanFlow() {
   const fd = new FormData();
   blobs.forEach((b, i) => fd.append("files", b, `frame-${i}.jpg`));
 
-  const data = await api("/api/scan/upload", { method: "POST", body: fd });
+  let totalBytes = 0;
+  blobs.forEach((b) => {
+    totalBytes += b.size;
+  });
+  scanLog("upload_prepare", {
+    frames: blobs.length,
+    totalBytes,
+    jpegBytesApprox: totalBytes,
+  });
+
+  const data = await api(
+    "/api/scan/upload",
+    { method: "POST", body: fd },
+    { uploadBytes: totalBytes },
+  );
   lastScanResult = data;
 
   status.textContent = "done";
