@@ -15,20 +15,34 @@ from backend.app.modules.capture_api import router as capture_router
 from backend.app.modules.inventory_routes import router as inventory_router
 from backend.app.modules.scheduler import start_scheduler
 
-ROOT = Path(__file__).resolve().parents[2]
-WEB_DIR = ROOT / "web"
-
 logger = logging.getLogger(__name__)
+
+
+def _resolve_web_dir() -> Path | None:
+    """Find ``web/`` with ``index.html`` — editable installs use repo layout; wheels need ``SMART_FRIDGE_WEB_ROOT``."""
+    if settings.web_root is not None:
+        p = Path(settings.web_root).expanduser().resolve()
+        if p.is_dir() and (p / "index.html").is_file():
+            return p
+        logger.warning("SMART_FRIDGE_WEB_ROOT is set but missing index.html: %s", p)
+    here = Path(__file__).resolve().parent
+    for base in [here, *here.parents]:
+        cand = base / "web"
+        if cand.is_dir() and (cand / "index.html").is_file():
+            return cand
+    return None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging(settings.log_level, json_logs=settings.json_logs)
+    wd = _resolve_web_dir()
     logger.info(
-        "startup log_level=%s scheduler_enabled=%s database=%s",
+        "startup log_level=%s scheduler_enabled=%s database=%s web_ui=%s",
         settings.log_level,
         settings.scheduler_enabled,
         settings.database_url.split("///")[-1][:80],
+        str(wd) if wd else "(not mounted — set SMART_FRIDGE_WEB_ROOT or run from repo clone)",
     )
     init_db()
     sched = None
@@ -69,5 +83,11 @@ def health():
     return {"status": "ok"}
 
 
-if WEB_DIR.is_dir():
-    app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
+_WEB_DIR = _resolve_web_dir()
+if _WEB_DIR is not None:
+    app.mount("/", StaticFiles(directory=str(_WEB_DIR), html=True), name="web")
+else:
+    logger.warning(
+        "Static web UI not found — open only /api/* and /health. "
+        "Clone the repo (see `web/`) or set SMART_FRIDGE_WEB_ROOT to that folder.",
+    )

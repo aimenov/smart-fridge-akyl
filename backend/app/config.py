@@ -40,5 +40,8 @@ class Settings(BaseSettings):
     expiring_warning_days: int = 2
     duplicate_scan_window_seconds: int = 120
 
+    #: Directory containing ``index.html`` for the PWA (default: discover ``web/`` upward from this package).
+    web_root: Path | None = None
+
 
 settings = Settings()

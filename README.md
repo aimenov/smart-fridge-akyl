@@ -46,6 +46,8 @@ Browsers treat `http://192.168.x.x` as **not a secure context**, so `getUserMedi
 
 Copy `.env.example` to `.env`. Telegram variables are prefixed with `SMART_FRIDGE_` (see `backend/app/config.py`).
 
+**Web UI missing (`GET /` returns `{"detail":"Not Found"}`)?** The server looks for a `web/` folder next to the installed package by walking up from `backend/app/main.py`. Plain `pip install` without the repo tree can skip that folder. Fix: install editable from the clone (`pip install -e ".[dev]"`) **or** set **`SMART_FRIDGE_WEB_ROOT`** to the absolute path of the project’s **`web`** directory (the one containing `index.html`).
+
 **Observability:** Set `SMART_FRIDGE_LOG_LEVEL=INFO` (default) to see per-request **`[trace=uuid]`** correlation, specialist pipeline **stage timings** (`timing_ms` in scan responses / DB), PaddleOCR stats when OCR runs, and **VLM** HTTP timing plus redacted request/response previews (`SMART_FRIDGE_VLM_LOG_PREVIEW_CHARS`). Use `DEBUG` for more verbose third-party logs.
 
 ## Tests
