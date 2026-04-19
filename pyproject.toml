@@ -22,11 +22,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Pillow + Tesseract bindings — installs on current Python (incl. 3.14). Install Tesseract binary separately.
 ocr = [
-  "paddlepaddle>=3.0.0",
-  "paddleocr>=3.0.0",
   "pillow>=10.0.0",
   "pytesseract>=0.3.10",
+]
+# PaddleOCR + Paddle — PyPI only publishes wheels for specific Python/OS combos (often 3.9–3.12 x64).
+# On unsupported Python (e.g. 3.14), pip cannot resolve these; use `.[ocr]` only or switch Python (e.g. 3.12).
+ocr-paddle = [
+  "paddlepaddle>=2.6.0",
+  "paddleocr>=2.7.0.3",
 ]
 dev = [
   "pytest>=8.0.0",

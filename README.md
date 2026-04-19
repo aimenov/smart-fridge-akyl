@@ -68,6 +68,16 @@ From the repo root:
 pip install ".[ocr]"
 ```
 
-That pulls in **PaddleOCR** (recommended for packaging labels) plus **pytesseract** / Pillow as a fallback when Paddle is not installed or returns almost no text. For Tesseract fallback, install the **Tesseract** binary and ensure `tesseract` is on `PATH` (Windows: see [UB Mannheim builds](https://github.com/UB-Mannheim/tesseract/wiki)).
+That installs **Pillow** and **pytesseract** (label OCR via the **Tesseract** engine). Install the **Tesseract** binary and ensure `tesseract` is on `PATH` (Windows: [UB Mannheim builds](https://github.com/UB-Mannheim/tesseract/wiki)).
 
-The server keeps one shared Paddle model in memory when Paddle is loaded. Point the phone at the **flat label** with text in focus and reasonable light.
+### PaddleOCR (often better on printed packaging)
+
+PyPI ships **paddlepaddle** only for certain Python versions (typically **3.9–3.12** on 64‑bit Windows/Linux). **Python 3.14+ usually has no wheels**, so `pip install paddlepaddle` fails with *“No matching distribution”* — use Python **3.12** (recommended) or **3.11** for Paddle, or stay on Tesseract-only `[ocr]` above.
+
+With a compatible Python:
+
+```powershell
+pip install ".[ocr]" ".[ocr-paddle]"
+```
+
+The server keeps one shared Paddle model in memory when Paddle loads. Point the phone at the **flat label** with text in focus and reasonable light.
