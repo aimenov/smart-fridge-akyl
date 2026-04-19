@@ -123,6 +123,115 @@ function formatFetchError(err) {
   return m;
 }
 
+/** Max longest edge (px); keeps LAN uploads small for iOS TLS + multipart reliability. */
+const UPLOAD_MAX_EDGE = 1600;
+const UPLOAD_JPEG_QUALITY = 0.72;
+
+/**
+ * Resize JPEG blobs for upload. iOS camera frames can be huge; smaller bodies avoid WebKit failures.
+ */
+async function compressBlobForUpload(blob) {
+  if (!(blob instanceof Blob) || blob.size < 1) return blob;
+
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(blob);
+  } catch {
+    return blob;
+  }
+  const w0 = bitmap.width;
+  const h0 = bitmap.height;
+  const scale = Math.min(1, UPLOAD_MAX_EDGE / Math.max(w0, h0));
+  const w = Math.max(1, Math.round(w0 * scale));
+  const h = Math.max(1, Math.round(h0 * scale));
+  const bigFile = blob.size > 450000;
+  if (scale >= 1 && !bigFile) {
+    bitmap.close();
+    return blob;
+  }
+
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d");
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  bitmap.close();
+
+  const out = await new Promise((resolve, reject) => {
+    c.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error("JPEG encode failed"))),
+      "image/jpeg",
+      UPLOAD_JPEG_QUALITY,
+    );
+  });
+  scanLog("frame_resized", { beforeBytes: blob.size, afterBytes: out.size, w, h });
+  return out;
+}
+
+/**
+ * iOS Safari often fails fetch() with FormData ("Load failed"); XHR multipart is reliable on WebKit.
+ */
+function xhrPostMultipart(path, formData, logContext) {
+  const url = new URL(path, location.origin).href;
+  const t0 = performance.now();
+  if (logContext) scanLog("xhr_start", { path, url, ...logContext });
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.responseType = "text";
+    xhr.timeout = 180000;
+
+    xhr.onload = () => {
+      const rid = xhr.getResponseHeader("X-Request-ID");
+      const ms = Math.round(performance.now() - t0);
+      if (logContext) {
+        scanLog("xhr_response", {
+          path,
+          status: xhr.status,
+          requestId: rid,
+          ms,
+        });
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText || "{}"));
+        } catch (e) {
+          if (logContext) scanLog("xhr_json_error", { message: String(e && e.message) });
+          reject(new Error(`Invalid JSON from ${path}`));
+        }
+      } else {
+        const body = (xhr.responseText || "").slice(0, 2000);
+        if (logContext) scanLog("xhr_http_error", { path, status: xhr.status, body });
+        reject(new Error(body || xhr.statusText || `HTTP ${xhr.status}`));
+      }
+    };
+
+    xhr.onerror = () => {
+      if (logContext) {
+        scanLog("xhr_network_error", {
+          path,
+          readyState: xhr.readyState,
+          status: xhr.status,
+          ms: Math.round(performance.now() - t0),
+        });
+      }
+      reject(new Error(formatFetchError({ message: "Load failed" })));
+    };
+
+    xhr.ontimeout = () => {
+      if (logContext) scanLog("xhr_timeout", { path });
+      reject(
+        new Error(
+          "Upload timed out after 3 minutes — the PC may still be loading OCR models; try again.",
+        ),
+      );
+    };
+
+    xhr.send(formData);
+  });
+}
+
 async function api(path, opts = {}, logContext) {
   const t0 = performance.now();
   if (logContext) {
@@ -207,7 +316,7 @@ async function captureFrames(n = 3) {
   const blobs = [];
   for (let i = 0; i < n; i++) {
     ctx.drawImage(video, 0, 0, w, h);
-    const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.85));
+    const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.8));
     if (!blob || blob.size < 100) {
       throw new Error("Captured frame was empty — wait for the preview to stabilize and try again.");
     }
@@ -266,25 +375,27 @@ async function runScanFlow() {
   status.textContent = "capturing frames…";
   const blobs = await captureFrames(3);
 
+  status.textContent = "preparing upload…";
+  const uploadBlobs = [];
+  for (let i = 0; i < blobs.length; i++) {
+    uploadBlobs.push(await compressBlobForUpload(blobs[i]));
+  }
+
   status.textContent = "uploading & reading date… (first scan can take 1–2 min)";
   const fd = new FormData();
-  blobs.forEach((b, i) => fd.append("files", b, `frame-${i}.jpg`));
+  uploadBlobs.forEach((b, i) => fd.append("files", b, `frame-${i}.jpg`));
 
   let totalBytes = 0;
-  blobs.forEach((b) => {
+  uploadBlobs.forEach((b) => {
     totalBytes += b.size;
   });
   scanLog("upload_prepare", {
-    frames: blobs.length,
+    frames: uploadBlobs.length,
     totalBytes,
-    jpegBytesApprox: totalBytes,
+    transport: "xhr",
   });
 
-  const data = await api(
-    "/api/scan/upload",
-    { method: "POST", body: fd },
-    { uploadBytes: totalBytes },
-  );
+  const data = await xhrPostMultipart("/api/scan/upload", fd, { uploadBytes: totalBytes });
   lastScanResult = data;
 
   status.textContent = "done";
