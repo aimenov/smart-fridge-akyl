@@ -60,7 +60,7 @@ fi
 echo "Authenticated as: ${LOGIN}"
 
 git remote remove origin 2>/dev/null || true
-git remote add origin "https://${LOGIN}:${GITHUB_TOKEN}@github.com/${LOGIN}/${REPO_NAME}.git"
+git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${LOGIN}/${REPO_NAME}.git"
 
 git push -u origin master
 
