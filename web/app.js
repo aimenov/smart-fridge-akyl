@@ -111,6 +111,73 @@ function formatFetchError(err) {
   return m;
 }
 
+/** Large readout + hints after /api/scan/upload (product vs expiry at a glance). */
+function fillScanHero(data) {
+  const pg = data.product_guess || {};
+  const prod = (pg.canonical_name || "").trim();
+  document.getElementById("hero-product").textContent = prod || "—";
+
+  let exp = data.normalized_date || "";
+  if (typeof exp === "string" && exp.length > 10) exp = exp.slice(0, 10);
+  document.getElementById("hero-expiry").textContent = exp || "—";
+
+  const tier = data.confidence_tier || "low";
+  const confNum = Number(data.confidence);
+  const tierEl = document.getElementById("tier");
+  const confEl = document.getElementById("conf");
+  if (tierEl) {
+    tierEl.textContent = tier;
+    tierEl.className = "status-pill " + tier;
+  }
+  if (confEl) {
+    confEl.textContent = Number.isFinite(confNum) ? confNum.toFixed(2) : "—";
+  }
+
+  const hintEl = document.getElementById("scan-hint");
+  const previewEl = document.getElementById("ocr-preview");
+  const pv = (data.ocr_text_preview || "").trim();
+
+  if (tier === "high") {
+    hintEl.textContent =
+      "Strong read — if this matches the package, scroll down and tap Save (edit fields if needed).";
+  } else if (tier === "medium") {
+    hintEl.textContent =
+      "Fair read — glance at Product and Expiry above, fix any mistakes in the fields, then Save.";
+  } else {
+    hintEl.textContent =
+      "Needs review — edit product name and expiry from the package. Optional: install PaddleOCR on the PC for sharper reads.";
+  }
+
+  if (previewEl) {
+    if (pv && tier !== "high") {
+      previewEl.textContent = "Machine read from label: " + pv;
+      previewEl.classList.remove("hidden");
+    } else {
+      previewEl.textContent = "";
+      previewEl.classList.add("hidden");
+    }
+  }
+}
+
+function wireConfirmHeroSync() {
+  const pn = document.getElementById("product-name");
+  const ex = document.getElementById("expiry");
+  const hp = document.getElementById("hero-product");
+  const he = document.getElementById("hero-expiry");
+  if (pn && hp) {
+    pn.addEventListener("input", () => {
+      hp.textContent = pn.value.trim() || "—";
+    });
+  }
+  if (ex && he) {
+    const sync = () => {
+      he.textContent = ex.value.trim() || "—";
+    };
+    ex.addEventListener("change", sync);
+    ex.addEventListener("input", sync);
+  }
+}
+
 /** Max longest edge (px) for upload bodies (keeps mobile uploads reliable). */
 const UPLOAD_MAX_EDGE = 1600;
 const UPLOAD_JPEG_QUALITY = 0.72;
@@ -296,20 +363,8 @@ async function runScanFlow() {
   const data = await xhrPostMultipart("/api/scan/upload", fd);
   lastScanResult = data;
 
-  status.textContent = "done";
+  status.textContent = "Review product & expiry in the card below";
   playDoneSound();
-
-  const tierEl = document.getElementById("tier");
-  const confEl = document.getElementById("conf");
-  const tier = data.confidence_tier || "low";
-  const confNum = Number(data.confidence);
-  if (tierEl) {
-    tierEl.textContent = tier;
-    tierEl.className = "status-pill " + tier;
-  }
-  if (confEl) {
-    confEl.textContent = Number.isFinite(confNum) ? confNum.toFixed(2) : "—";
-  }
 
   const pg = data.product_guess || {};
   document.getElementById("product-name").value = pg.canonical_name || "";
@@ -319,7 +374,9 @@ async function runScanFlow() {
   document.getElementById("expiry").value = exp;
   document.getElementById("date-type").value = data.date_type || "";
 
+  fillScanHero(data);
   confirmBox.classList.remove("hidden");
+  confirmBox.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 async function confirmScan() {
@@ -486,9 +543,22 @@ function renderPage() {
         </div>
       </section>
       <section class="panel hidden" id="confirm-panel">
-        <h2>Confirmation</h2>
-        <p>Tier <span id="tier" class="status-pill">—</span>
+        <h2>Confirm</h2>
+        <div class="scan-readout" aria-live="polite">
+          <div class="scan-readout-row">
+            <span class="scan-readout-label">Product name</span>
+            <div class="scan-readout-value" id="hero-product">—</div>
+          </div>
+          <div class="scan-readout-row">
+            <span class="scan-readout-label">Expiry date</span>
+            <div class="scan-readout-value scan-readout-expiry" id="hero-expiry">—</div>
+          </div>
+        </div>
+        <p class="scan-hint muted" id="scan-hint"></p>
+        <p class="ocr-preview muted hidden" id="ocr-preview"></p>
+        <p class="muted scan-meta">Tier <span id="tier" class="status-pill">—</span>
           · score <span id="conf">0</span></p>
+        <h3 class="fine-print-heading">Adjust if needed</h3>
         <label class="field">Product<input id="product-name" /></label>
         <label class="field">Barcode<input id="barcode" /></label>
         <label class="field">Expiry (YYYY-MM-DD)<input id="expiry" type="date" /></label>
@@ -514,6 +584,7 @@ function renderPage() {
         document.getElementById("scan-status").textContent = "Error: " + formatFetchError(e);
       });
     document.getElementById("btn-stop-cam").onclick = () => stopCamera();
+    wireConfirmHeroSync();
     document.getElementById("btn-confirm").onclick = () =>
       confirmScan().catch((e) => alert(e.message));
   } else if (activeId === "inventory") {

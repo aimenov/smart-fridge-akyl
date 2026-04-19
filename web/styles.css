@@ -179,3 +179,70 @@ select {
   padding: 0.1rem 0.35rem;
   border-radius: 4px;
 }
+
+.scan-readout {
+  background: linear-gradient(145deg, #f0fdfa, #ecfeff);
+  border: 1px solid #99f6e4;
+  border-radius: 14px;
+  padding: 0.85rem 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.scan-readout-row {
+  margin-bottom: 0.65rem;
+}
+
+.scan-readout-row:last-child {
+  margin-bottom: 0;
+}
+
+.scan-readout-label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #0f766e;
+  margin-bottom: 0.2rem;
+}
+
+.scan-readout-value {
+  font-size: 1.35rem;
+  font-weight: 700;
+  line-height: 1.25;
+  color: #0f172a;
+  word-break: break-word;
+}
+
+.scan-readout-expiry {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.scan-hint {
+  font-size: 0.92rem;
+  line-height: 1.45;
+  margin: 0 0 0.5rem;
+}
+
+.ocr-preview {
+  font-size: 0.82rem;
+  line-height: 1.35;
+  margin: 0 0 0.65rem;
+  padding: 0.5rem 0.65rem;
+  background: #f8fafc;
+  border-radius: 10px;
+  border: 1px dashed #cbd5e1;
+}
+
+.scan-meta {
+  margin: 0 0 0.85rem;
+  font-size: 0.85rem;
+}
+
+.fine-print-heading {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #475569;
+}

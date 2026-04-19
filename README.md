@@ -60,6 +60,10 @@ Source: [github.com/aimenov/smart-fridge-akyl](https://github.com/aimenov/smart-
 
 ## Optional OCR
 
+Barcode/QR detection works without extra packages; **printed product names and expiry dates** need OCR. Install Paddle for practical accuracy on real packaging:
+
 ```powershell
 pip install paddlepaddle paddleocr
 ```
+
+The server keeps one shared Paddle model in memory (faster repeat scans). Point the phone at the **flat label** with text in focus and reasonable light.

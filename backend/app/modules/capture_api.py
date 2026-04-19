@@ -40,6 +40,15 @@ def _tier(conf: float) -> str:
     return "low"
 
 
+def _ocr_preview(raw: str, limit: int = 420) -> str:
+    if not raw:
+        return ""
+    collapsed = " ".join(raw.split())
+    if len(collapsed) > limit:
+        return collapsed[: limit - 1] + "…"
+    return collapsed
+
+
 def _degraded_pipeline_result(reason: str) -> PipelineResult:
     """OCR/native code failed; return a safe empty result so the client still gets HTTP 200."""
     return PipelineResult(
@@ -158,6 +167,7 @@ async def upload_scan(
             raw_date_text=result.raw_date_text,
             normalized_date=result.normalized_date,
             barcode=result.barcode,
+            ocr_text_preview=_ocr_preview(result.raw_ocr_text or ""),
             pipeline=safe_stages if isinstance(safe_stages, dict) else {},
         )
     except HTTPException:

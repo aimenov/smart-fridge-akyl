@@ -52,7 +52,7 @@ def test_vlm_called_when_enabled_low_confidence(client, vlm_on, caplog):
     from tests.conftest import make_test_jpeg_bytes
 
     jpeg = make_test_jpeg_bytes(text="")
-    with patch("backend.app.modules.vision_pipeline._try_paddle_ocr", return_value=("", 0.0, 0.001)):
+    with patch("backend.app.modules.vision_pipeline._get_paddle_ocr", return_value=None):
         with patch("backend.app.modules.vision_pipeline.cv2.imread") as imread:
             import numpy as np
 
@@ -84,7 +84,7 @@ def test_vlm_http_error_logged(client, vlm_on, caplog):
     from tests.conftest import make_test_jpeg_bytes
 
     jpeg = make_test_jpeg_bytes()
-    with patch("backend.app.modules.vision_pipeline._try_paddle_ocr", return_value=("", 0.0, 0.001)):
+    with patch("backend.app.modules.vision_pipeline._get_paddle_ocr", return_value=None):
         with patch("backend.app.modules.vision_pipeline.cv2.imread") as imread:
             import numpy as np
 

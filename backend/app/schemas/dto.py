@@ -48,6 +48,8 @@ class ScanUploadResponse(BaseModel):
     raw_date_text: Optional[str] = None
     normalized_date: Optional[str] = None
     barcode: Optional[str] = None
+    #: Short excerpt of combined OCR for debugging low-confidence reads (optional).
+    ocr_text_preview: Optional[str] = None
     pipeline: dict[str, Any] = Field(default_factory=dict)
 
 

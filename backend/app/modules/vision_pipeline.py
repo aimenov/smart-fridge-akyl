@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -19,38 +20,99 @@ from backend.app.observability import trace_prefix
 
 logger = logging.getLogger(__name__)
 
+_MISSING = object()
+_paddle_singleton: Any = None
 
-def _try_paddle_ocr(images: list[np.ndarray]) -> tuple[str, float, float]:
-    """
-    Returns (text, mean_line_confidence, wall_time_seconds).
-    When PaddleOCR is not installed, returns ("", 0.0, 0.0) quickly.
-    """
-    t0 = time.perf_counter()
+
+def _get_paddle_ocr():
+    """Single shared PaddleOCR instance (lazy); None if unavailable."""
+    global _paddle_singleton
+    if _paddle_singleton is _MISSING:
+        return None
+    if _paddle_singleton is not None:
+        return _paddle_singleton
     try:
         from paddleocr import PaddleOCR  # type: ignore
-    except ImportError:
-        return "", 0.0, time.perf_counter() - t0
-    try:
-        ocr = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
+
+        _paddle_singleton = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
+        logger.info("%sPaddleOCR engine initialised (singleton)", trace_prefix())
     except Exception:
-        return "", 0.0, time.perf_counter() - t0
+        logger.warning("%sPaddleOCR not available — install paddleocr+paddle for label reads", trace_prefix())
+        _paddle_singleton = _MISSING
+        return None
+    return _paddle_singleton
+
+
+def _lines_from_paddle_result(result: Any) -> tuple[list[str], list[float]]:
     chunks: list[str] = []
-    confidences: list[float] = []
+    confs: list[float] = []
+    if not result or not result[0]:
+        return chunks, confs
+    for line in result[0]:
+        text = line[1][0]
+        conf = float(line[1][1])
+        chunks.append(text)
+        confs.append(conf)
+    return chunks, confs
+
+
+def _run_paddle_on_gray(ocr: Any, gray: np.ndarray) -> tuple[list[str], list[float]]:
     try:
-        for img in images:
-            result = ocr.ocr(img, cls=True)
-            if not result or not result[0]:
-                continue
-            for line in result[0]:
-                text = line[1][0]
-                conf = float(line[1][1])
-                chunks.append(text)
-                confidences.append(conf)
+        result = ocr.ocr(gray, cls=True)
+        return _lines_from_paddle_result(result)
     except Exception:
-        return "\n".join(chunks), 0.0, time.perf_counter() - t0
-    text = "\n".join(chunks)
-    avg = sum(confidences) / len(confidences) if confidences else 0.0
-    return text, avg, time.perf_counter() - t0
+        return [], []
+
+
+def _full_frame_pass(ocr: Any, images_bgr: list[np.ndarray]) -> tuple[str, float]:
+    """Run OCR on resized full frames + light sharpen — best for packaging labels."""
+    all_lines: list[str] = []
+    all_confs: list[float] = []
+    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+
+    for im in images_bgr:
+        gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape[:2]
+        m = max(h, w)
+        if m > 1280:
+            scale = 1280 / m
+            gray = cv2.resize(gray, (max(1, int(w * scale)), max(1, int(h * scale))))
+        sharp = cv2.filter2D(gray, -1, kernel)
+
+        for variant in (gray, sharp):
+            lines, confs = _run_paddle_on_gray(ocr, variant)
+            all_lines.extend(lines)
+            all_confs.extend(confs)
+
+    text = "\n".join(all_lines)
+    avg = sum(all_confs) / len(all_confs) if all_confs else 0.0
+    return text.strip(), avg
+
+
+def _tile_variant_pass(ocr: Any, images_bgr: list[np.ndarray]) -> tuple[str, float]:
+    """Dense tiles + preprocess variants — slower; used when full-frame text is thin."""
+    ocr_inputs: list[np.ndarray] = []
+    for im in images_bgr:
+        gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape[:2]
+        m = max(h, w)
+        if m > 960:
+            scale = 960 / m
+            gray = cv2.resize(gray, (max(1, int(w * scale)), max(1, int(h * scale))))
+        ocr_inputs.extend(_preprocess_variants(im))
+        ocr_inputs.extend(_tiles(gray))
+
+    all_lines: list[str] = []
+    all_confs: list[float] = []
+    t0 = time.perf_counter()
+    for img in ocr_inputs:
+        lines, confs = _run_paddle_on_gray(ocr, img)
+        all_lines.extend(lines)
+        all_confs.extend(confs)
+    wall_s = time.perf_counter() - t0
+    text = "\n".join(all_lines)
+    avg = sum(all_confs) / len(all_confs) if all_confs else 0.0
+    return text.strip(), avg, wall_s
 
 
 def _decode_barcodes(bgr: np.ndarray) -> list[str]:
@@ -102,6 +164,63 @@ def _tiles(gray: np.ndarray, rows: int = 2, cols: int = 2) -> list[np.ndarray]:
     return tiles
 
 
+def _pick_product_line(lines: list[str], date_snippets: set[str]) -> Optional[str]:
+    """Prefer a line that looks like a product name, not only digits / dates."""
+    candidates: list[tuple[float, str]] = []
+    for ln in lines:
+        s = ln.strip()
+        if len(s) < 3:
+            continue
+        if s in date_snippets:
+            continue
+        if re.match(r"^[\d\s./\-:]+$", s) and len(s) < 18:
+            continue
+        alpha = sum(c.isalpha() for c in s)
+        alpha_ratio = alpha / max(len(s), 1)
+        if alpha_ratio >= 0.25 or alpha >= 6:
+            candidates.append((alpha_ratio * len(s), s))
+    if candidates:
+        candidates.sort(key=lambda x: -x[0])
+        return candidates[0][1][:512]
+    for ln in lines:
+        t = ln.strip()
+        if len(t) >= 4 and t not in date_snippets:
+            return t[:512]
+    return lines[0][:512].strip() if lines else None
+
+
+def _confidence_score(
+    *,
+    date_conf: float,
+    paddle_conf: float,
+    combined_len: int,
+    barcode: Optional[str],
+    product_guess: Optional[str],
+    had_ocr_engine: bool,
+) -> float:
+    """Blend date-parse score with OCR trust; avoid flat zero when partial signals exist."""
+    text_density = min(1.0, combined_len / 200.0)
+    paddle_eff = paddle_conf
+    if paddle_eff <= 0.02 and combined_len >= 15:
+        paddle_eff = max(paddle_eff, 0.25 + 0.35 * text_density)
+    elif not had_ocr_engine and combined_len >= 20:
+        paddle_eff = max(paddle_eff, 0.18 + 0.25 * text_density)
+
+    base = date_conf * (0.42 + 0.58 * min(1.0, max(paddle_eff, 0.12)))
+
+    if barcode:
+        base = max(base, 0.42 if date_conf > 0 else 0.34)
+
+    pg = (product_guess or "").strip()
+    if len(pg) >= 5:
+        base = max(base, 0.18 + min(0.22, len(pg) / 120.0))
+
+    if date_conf <= 0.01 and combined_len > 80 and paddle_eff > 0.2:
+        base = max(base, 0.12)
+
+    return float(min(1.0, max(0.0, base)))
+
+
 @dataclass
 class PipelineResult:
     barcode: Optional[str]
@@ -119,8 +238,8 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
     stages: dict[str, Any] = {}
     timing_ms: dict[str, float] = {}
     barcodes: list[str] = []
-    all_ocr_chunks: list[str] = []
     paddle_conf = 0.0
+    ocr_wall_s = 0.0
 
     t_load0 = time.perf_counter()
     images_bgr = [cv2.imread(str(p)) for p in image_paths]
@@ -147,36 +266,38 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
     barcode = barcodes[0] if barcodes else None
     stages["barcodes"] = barcodes
 
-    t_prep0 = time.perf_counter()
-    ocr_inputs: list[np.ndarray] = []
-    for im in images_bgr:
-        ocr_inputs.extend(_preprocess_variants(im))
-        gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
-        ocr_inputs.extend(_tiles(gray))
-    timing_ms["preprocess_tiles"] = (time.perf_counter() - t_prep0) * 1000.0
+    ocr = _get_paddle_ocr()
+    combined = ""
+    used_full_then_tiles = False
 
-    paddle_text, paddle_conf, paddle_wall_s = _try_paddle_ocr(ocr_inputs)
-    timing_ms["paddle_ocr"] = paddle_wall_s * 1000.0
-    all_ocr_chunks.append(paddle_text)
+    if ocr is not None:
+        t_o0 = time.perf_counter()
+        full_text, full_conf = _full_frame_pass(ocr, images_bgr)
+        combined = full_text
+        paddle_conf = full_conf
+        if len(combined) < 35:
+            tile_text, tile_conf, tile_wall = _tile_variant_pass(ocr, images_bgr)
+            ocr_wall_s = tile_wall
+            if tile_text:
+                combined = (combined + "\n" + tile_text).strip()
+                paddle_conf = max(paddle_conf, tile_conf)
+            used_full_then_tiles = True
+        timing_ms["paddle_ocr"] = (time.perf_counter() - t_o0) * 1000.0
+        stages["ocr_strategy"] = "full_frame_plus_tiles" if used_full_then_tiles else "full_frame"
+    else:
+        timing_ms["paddle_ocr"] = 0.0
+        stages["ocr_strategy"] = "none"
 
-    combined = "\n".join(t for t in all_ocr_chunks if t).strip()
-    stages["ocr_engine"] = "paddleocr" if paddle_conf > 0 else "none"
-    if paddle_conf > 0:
-        logger.info(
-            "%sPaddleOCR: %d line(s) read, mean_conf=%.3f, imgs=%d",
-            trace_prefix(),
-            len(combined.splitlines()),
-            paddle_conf,
-            len(ocr_inputs),
-        )
+    stages["ocr_engine"] = "paddleocr" if ocr is not None else "none"
 
     lines = [ln.strip() for ln in combined.splitlines() if len(ln.strip()) > 2]
-    product_guess = lines[0][:120] if lines else None
 
     t_parse0 = time.perf_counter()
     parsed_list = date_parse.parse_dates_from_text(combined)
     timing_ms["date_parse_heuristic"] = (time.perf_counter() - t_parse0) * 1000.0
     stages["parsed_dates"] = [(d.isoformat(), c, s) for d, c, s in parsed_list]
+
+    date_snippets = {s for _, _, s in parsed_list}
 
     best_date: Optional[date] = None
     date_conf = 0.0
@@ -190,11 +311,23 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
 
     norm = best_date.isoformat() if best_date else None
 
-    conf = date_conf * (0.55 + 0.45 * min(paddle_conf or 0.5, 1.0))
-    if barcode and best_date:
-        conf = min(1.0, conf + 0.05)
+    product_guess = _pick_product_line(lines, date_snippets)
 
-    stages["confidence_breakdown"] = {"date_parse": date_conf, "paddle_avg": paddle_conf}
+    conf = _confidence_score(
+        date_conf=date_conf,
+        paddle_conf=paddle_conf,
+        combined_len=len(combined),
+        barcode=barcode,
+        product_guess=product_guess,
+        had_ocr_engine=ocr is not None,
+    )
+
+    stages["confidence_breakdown"] = {
+        "date_parse": date_conf,
+        "paddle_avg": paddle_conf,
+        "text_chars": len(combined),
+        "ocr_wall_tile_s": ocr_wall_s,
+    }
 
     tier = "low"
     if conf >= CONFIDENCE_HIGH:
@@ -208,22 +341,15 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
     stages["timing_ms"] = timing_ms
 
     logger.info(
-        "%svision specialist pipeline: total=%.2fs "
-        "(load=%.0fms barcode_qr=%.0fms preprocess=%.0fms paddle=%.0fms parse=%.0fms) "
-        "images=%d decoded=%d barcodes=%d ocr_chars=%d conf=%.3f tier=%s",
+        "%svision pipeline: total=%.2fs paddle_conf=%.3f date_conf=%.3f conf=%.3f tier=%s chars=%d barcode=%s",
         trace_prefix(),
         elapsed,
-        timing_ms["load_images"],
-        timing_ms["barcode_qr"],
-        timing_ms["preprocess_tiles"],
-        timing_ms["paddle_ocr"],
-        timing_ms["date_parse_heuristic"],
-        len(image_paths),
-        len(images_bgr),
-        len(barcodes),
-        len(combined),
+        paddle_conf,
+        date_conf,
         float(conf),
         tier,
+        len(combined),
+        barcode,
     )
 
     return PipelineResult(
