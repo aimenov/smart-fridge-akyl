@@ -57,6 +57,10 @@ async def security_headers(request: Request, call_next):
     """Allow camera on same origin; mobile browsers require secure context + explicit policy."""
     response = await call_next(request)
     response.headers.setdefault("Permissions-Policy", "camera=(self), microphone=()")
+    # Avoid HTTP/1.1 keep-alive reuse for API calls — some clients + httptools trip over the
+    # next request on the same socket (uvicorn logs "Invalid HTTP request received").
+    if request.url.path.startswith("/api"):
+        response.headers["connection"] = "close"
     return response
 
 

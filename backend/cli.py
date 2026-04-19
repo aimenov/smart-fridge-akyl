@@ -28,6 +28,12 @@ def main(argv: list[str] | None = None) -> None:
     )
     p.add_argument("--ssl-keyfile", default=None, help="Private key for HTTPS")
     p.add_argument("--no-scheduler", action="store_true", help="Disable background jobs")
+    p.add_argument(
+        "--http-protocol",
+        default=None,
+        choices=("auto", "h11", "httptools"),
+        help="Uvicorn HTTP stack (default: h11 — fewer mobile multipart issues than httptools)",
+    )
 
     args = p.parse_args(argv)
 
@@ -45,6 +51,8 @@ def main(argv: list[str] | None = None) -> None:
         os.environ["SMART_FRIDGE_SSL_KEYFILE"] = args.ssl_keyfile
     if args.no_scheduler:
         os.environ["SMART_FRIDGE_SCHEDULER_ENABLED"] = "false"
+    if args.http_protocol is not None:
+        os.environ["SMART_FRIDGE_HTTP_PROTOCOL"] = args.http_protocol
 
     # Import after env so Settings picks up overrides
     from backend.app.config import settings
@@ -67,7 +75,8 @@ def main(argv: list[str] | None = None) -> None:
     proto = "https" if ssl_kw else "http"
     print(
         f"smart-fridge: starting {proto}://{settings.host}:{settings.port}/ "
-        f"(reload={settings.reload}, scheduler={settings.scheduler_enabled})",
+        f"(reload={settings.reload}, scheduler={settings.scheduler_enabled}, "
+        f"http={settings.http_protocol})",
         file=sys.stderr,
     )
 
@@ -77,6 +86,7 @@ def main(argv: list[str] | None = None) -> None:
         port=settings.port,
         reload=settings.reload,
         log_level=settings.log_level.lower(),
+        http=settings.http_protocol,
         **ssl_kw,
     )
 

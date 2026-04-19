@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -18,6 +19,9 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8765
     reload: bool = False
+    #: Passed to uvicorn as ``http=``. ``h11`` avoids httptools parse failures on some mobile
+    #: browsers + large multipart POSTs (symptom: ``Invalid HTTP request received``).
+    http_protocol: Literal["auto", "h11", "httptools"] = "h11"
 
     ssl_certfile: Path | None = None
     ssl_keyfile: Path | None = None
