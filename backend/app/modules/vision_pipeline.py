@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 import uuid
@@ -24,6 +25,15 @@ _MISSING = object()
 _paddle_singleton: Any = None
 
 
+def _ensure_paddle_runtime_env() -> None:
+    """PaddleOCR 3.x / PaddleX checks “model hosts” unless this is set — slow and fails offline."""
+    if settings.paddle_pdx_disable_model_source_check:
+        os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+
+
+_ensure_paddle_runtime_env()
+
+
 def _get_paddle_ocr():
     """Single shared PaddleOCR instance (lazy); None if unavailable."""
     global _paddle_singleton
@@ -31,13 +41,22 @@ def _get_paddle_ocr():
         return None
     if _paddle_singleton is not None:
         return _paddle_singleton
+    _ensure_paddle_runtime_env()
     try:
         from paddleocr import PaddleOCR  # type: ignore
-
+    except ImportError:
+        logger.warning("%spaddleocr package not installed — use pip install -e \".[dev]\" (Python <3.14 for Paddle wheels)", trace_prefix())
+        _paddle_singleton = _MISSING
+        return None
+    try:
         _paddle_singleton = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
         logger.info("%sPaddleOCR engine initialised (singleton)", trace_prefix())
     except Exception:
-        logger.warning("%sPaddleOCR not available — install paddleocr+paddle for label reads", trace_prefix())
+        logger.exception(
+            "%sPaddleOCR() failed — next scans skip Paddle until server restart; "
+            "check CUDA/Paddle install or set SMART_FRIDGE_PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=true",
+            trace_prefix(),
+        )
         _paddle_singleton = _MISSING
         return None
     return _paddle_singleton
@@ -140,39 +159,97 @@ def _decode_qr(bgr: np.ndarray) -> list[str]:
     return []
 
 
-def _try_tesseract_text(images_bgr: list[np.ndarray]) -> tuple[str, float]:
+def _tesseract_gray_variants(gray: np.ndarray) -> list[tuple[str, np.ndarray]]:
+    """Several preprocess paths — labels are for diagnostics only."""
+    h, w = gray.shape[:2]
+    if max(h, w) < 960:
+        gray = cv2.resize(
+            gray,
+            (max(1, int(w * 2.0)), max(1, int(h * 2.0))),
+            interpolation=cv2.INTER_CUBIC,
+        )
+    out: list[tuple[str, np.ndarray]] = [("gray", gray)]
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
+    _, otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    out.append(("otsu", otsu))
+    at = cv2.adaptiveThreshold(
+        blur,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31,
+        9,
+    )
+    out.append(("adaptive", at))
+    return out
+
+
+def _try_tesseract_text(images_bgr: list[np.ndarray]) -> tuple[str, float, dict[str, Any]]:
     """Fallback OCR when Paddle is unavailable or nearly empty (needs ``pytesseract`` + Tesseract binary)."""
+    diag: dict[str, Any] = {}
     try:
         import pytesseract  # type: ignore
         from PIL import Image
     except ImportError:
-        return "", 0.0
+        diag["error"] = "pytesseract_not_installed"
+        logger.warning(
+            "%sTesseract fallback skipped — install pytesseract + Pillow (included in pip install -e \".[dev]\")",
+            trace_prefix(),
+        )
+        return "", 0.0, diag
 
-    chunks: list[str] = []
-    for im in images_bgr[:4]:
-        try:
-            gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
-            h, w = gray.shape[:2]
-            if max(h, w) < 960:
-                gray = cv2.resize(
-                    gray,
-                    (max(1, int(w * 1.85)), max(1, int(h * 1.85))),
-                    interpolation=cv2.INTER_CUBIC,
-                )
-            blur = cv2.GaussianBlur(gray, (3, 3), 0)
-            _, bw = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            pil = Image.fromarray(bw)
-            txt = pytesseract.image_to_string(pil, lang="eng", config="--psm 6")
-            if txt and txt.strip():
-                chunks.append(txt.strip())
-        except Exception:
-            logger.debug("%stesseract frame failed", trace_prefix(), exc_info=True)
+    if settings.tesseract_cmd is not None:
+        pytesseract.pytesseract.tesseract_cmd = str(settings.tesseract_cmd.expanduser().resolve())
+        diag["tesseract_cmd"] = str(settings.tesseract_cmd)
 
-    text = "\n".join(chunks).strip()
+    try:
+        ver = pytesseract.get_tesseract_version()
+        diag["tesseract_version"] = str(ver)
+    except Exception as e:
+        diag["error"] = "tesseract_binary_missing_or_failed"
+        diag["detail"] = str(e)
+        logger.warning(
+            "%sTesseract executable not found or failed (%s). Add it to PATH or set SMART_FRIDGE_TESSERACT_CMD "
+            "to tesseract.exe (Windows: winget install UB-Mannheim.TesseractOCR).",
+            trace_prefix(),
+            e,
+        )
+        return "", 0.0, diag
+
+    collected: list[str] = []
+    for im in images_bgr[:3]:
+        gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+        for vlabel, arr in _tesseract_gray_variants(gray):
+            pil = Image.fromarray(arr)
+            for psm in ("--psm 6", "--psm 11"):
+                try:
+                    txt = pytesseract.image_to_string(pil, lang="eng", config=psm)
+                    if txt and txt.strip():
+                        collected.append(txt.strip())
+                except Exception:
+                    logger.debug("%stesseract %s %s failed", trace_prefix(), vlabel, psm, exc_info=True)
+
+    # Dedupe similar chunks while keeping order
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for c in collected:
+        key = c[:200]
+        if key not in seen:
+            seen.add(key)
+            uniq.append(c)
+    text = "\n".join(uniq).strip()
+    diag["variants_tried"] = len(collected)
     if not text:
-        return "", 0.0
+        diag["error"] = "no_text_extracted"
+        logger.warning(
+            "%sTesseract ran but read no text — improve lighting, hold the label flat, or install Paddle on Python 3.11–3.12",
+            trace_prefix(),
+        )
+        return "", 0.0, diag
+
     conf = 0.42 if len(text) >= 12 else 0.28
-    return text, conf
+    diag["chars"] = len(text)
+    return text, conf, diag
 
 
 def _preprocess_variants(bgr: np.ndarray) -> list[np.ndarray]:
@@ -341,8 +418,10 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
         stages["ocr_strategy"] = "none"
 
     tess_merged = False
+    tess_diag: dict[str, Any] = {}
     if ocr is None or len(combined.strip()) < 15:
-        tess_text, tess_conf = _try_tesseract_text(images_bgr)
+        tess_text, tess_conf, tess_diag = _try_tesseract_text(images_bgr)
+        stages["tesseract_diag"] = tess_diag
         if tess_text.strip():
             tess_merged = True
             combined = (combined + "\n" + tess_text).strip() if combined.strip() else tess_text.strip()

@@ -64,6 +64,8 @@ Source: [github.com/aimenov/smart-fridge-akyl](https://github.com/aimenov/smart-
 
 Barcode/QR work out of the box; **printed names and expiry dates** need OCR. **`pip install -e ".[dev]"`** pulls in **Pillow**, **pytesseract**, tests, and — on Python **below 3.14** — **Paddle** + **PaddleOCR** (PyPI has no Paddle wheels for 3.14 yet; use Tesseract only, or Python **3.12** if you want Paddle).
 
-Install the **Tesseract** binary and put `tesseract` on `PATH` for the Tesseract fallback ([Windows builds](https://github.com/UB-Mannheim/tesseract/wiki)).
+Install the **Tesseract** binary and put `tesseract` on `PATH` for the Tesseract fallback ([Windows builds](https://github.com/UB-Mannheim/tesseract/wiki)). If the app cannot find it, set **`SMART_FRIDGE_TESSERACT_CMD`** to the full path of `tesseract.exe`.
+
+**Blank scans / “PaddleOCR not available”:** (1) **Restart the API** after upgrading — Paddle stays off for the rest of the process after one failed init. (2) The **“Checking connectivity to the model hosters”** delay is avoided by default via **`PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK`** (see **`SMART_FRIDGE_PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK`**, default **true**). (3) On **Python 3.14**, Paddle wheels are missing — use **3.12** for Paddle or rely on **Tesseract** only.
 
 The server keeps one shared Paddle model in memory when Paddle is installed. Point the phone at the **flat label** with text in focus and reasonable light.

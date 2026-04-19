@@ -43,5 +43,11 @@ class Settings(BaseSettings):
     #: Directory containing ``index.html`` for the PWA (default: discover ``web/`` upward from this package).
     web_root: Path | None = None
 
+    #: Set ``PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK`` before Paddle loads — avoids long waits / failures when “model host” is unreachable (default: on).
+    paddle_pdx_disable_model_source_check: bool = True
+
+    #: Full path to ``tesseract.exe`` when it is not on ``PATH`` (Windows e.g. ``C:/Program Files/Tesseract-OCR/tesseract.exe``).
+    tesseract_cmd: Path | None = None
+
 
 settings = Settings()
