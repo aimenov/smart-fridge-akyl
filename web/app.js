@@ -396,11 +396,12 @@ function mergeExpiryFromScan(data) {
   if (data.date_type) document.getElementById("date-type").value = data.date_type;
 }
 
-async function uploadScanBlob(blob) {
+async function uploadScanBlob(blob, phase) {
   const compressed = await compressBlobForUpload(blob);
   const fd = new FormData();
   fd.append("files", compressed, "frame.jpg");
-  return xhrPostMultipart("/api/scan/upload", fd);
+  const ph = phase ? String(phase) : "both";
+  return xhrPostMultipart(`/api/scan/upload?phase=${encodeURIComponent(ph)}`, fd);
 }
 
 async function flashRingSuccess() {
@@ -444,7 +445,7 @@ async function liveScanLoop(phase) {
     while (Date.now() < ctrl.deadline && !ctrl.stopped) {
       let data;
       try {
-        data = await uploadScanBlob(await captureSingleFrame());
+        data = await uploadScanBlob(await captureSingleFrame(), phase);
       } catch (e) {
         const statusEl = document.getElementById("scan-status");
         stopLiveScanTicker();

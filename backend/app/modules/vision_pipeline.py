@@ -165,7 +165,7 @@ def _pick_barcode_consensus(
     return (matching[0] if matching else None), debug
 
 
-def run_pipeline(image_paths: list[Path]) -> PipelineResult:
+def run_pipeline(image_paths: list[Path], *, run_expiry: bool = True) -> PipelineResult:
     t0 = time.perf_counter()
     stages: dict[str, Any] = {}
     timing_ms: dict[str, float] = {}
@@ -220,19 +220,26 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
     stages["qr_codes"] = qr_strings
     stages["barcode_consensus"] = consensus_dbg
 
-    # Expiry OCR (PaddleOCR + CV preprocessing + parsing + consensus)
-    t_exp0 = time.perf_counter()
-    exp = extract_expiry(images_bgr)
-    timing_ms["expiry_ms"] = (time.perf_counter() - t_exp0) * 1000.0
-    stages["expiry"] = exp.stages
+    normalized_date = None
+    raw_date_text = None
+    date_type = DateType.unknown
+    if run_expiry:
+        # Expiry OCR (PaddleOCR + CV preprocessing + parsing + consensus)
+        t_exp0 = time.perf_counter()
+        exp = extract_expiry(images_bgr)
+        timing_ms["expiry_ms"] = (time.perf_counter() - t_exp0) * 1000.0
+        stages["expiry"] = exp.stages
 
-    # Do not surface low-confidence expiry guesses (same principle as barcode).
-    normalized_date = exp.normalized_date
-    raw_date_text = exp.raw_date_text
-    date_type = exp.date_type
+        # Do not surface low-confidence expiry guesses (same principle as barcode).
+        normalized_date = exp.normalized_date
+        raw_date_text = exp.raw_date_text
+        date_type = exp.date_type or DateType.unknown
+    else:
+        timing_ms["expiry_ms"] = 0.0
+        stages["expiry"] = {"skipped": True}
 
     stages["tier"] = "high" if (display_barcode or normalized_date) else "low"
-    conf = 0.93 if display_barcode else (float(exp.confidence) if normalized_date else 0.0)
+    conf = 0.93 if display_barcode else (float(exp.confidence) if (run_expiry and normalized_date) else 0.0)
 
     elapsed = time.perf_counter() - t0
     timing_ms["total"] = elapsed * 1000.0

@@ -36,12 +36,13 @@ def expected_date_from_stem(path: Path) -> str | None:
 import re
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("image_path", _expiry_fixture_paths())
 def test_expiry_image_matches_filename_date(image_path: Path):
     expected = expected_date_from_stem(image_path)
     assert expected is not None, f"fixture name must encode a date: {image_path.name}"
 
-    result = run_pipeline([image_path])
+    result = run_pipeline([image_path], run_expiry=True)
     assert result.normalized_date == expected, (
         f"{image_path.name}: expected {expected}, got {result.normalized_date!r}; "
         f"stages_expiry={result.stages.get('expiry')}"

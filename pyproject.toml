@@ -42,6 +42,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = "-m 'not integration'"
 markers = [
   "integration: calls HTTP mocks or multi-step API flows",
 ]

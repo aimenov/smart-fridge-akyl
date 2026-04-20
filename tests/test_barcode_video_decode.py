@@ -61,7 +61,7 @@ def test_barcode_video_matches_filename_gtin(video_path: Path, tmp_path: Path):
     frames = _extract_frames_to_images(video_path, tmp_path, max_frames=7)
     assert frames, f"could not read frames from {video_path.name}"
 
-    result = run_pipeline(frames)
+    result = run_pipeline(frames, run_expiry=False)
     assert result.normalized_gtin_14 == expected, (
         f"{video_path.name}: expected normalized GTIN-14 {expected}, got {result.normalized_gtin_14!r}; "
         f"consensus={result.stages.get('barcode_consensus')} decoded={result.stages.get('barcodes_decoded')}"

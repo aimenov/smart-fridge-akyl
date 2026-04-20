@@ -31,7 +31,7 @@ def test_barcode_image_matches_filename_gtin(image_path: Path):
     expected = expected_gtin14_from_stem(image_path)
     assert expected is not None, f"fixture name must encode >=8 digits: {image_path.name}"
 
-    result = run_pipeline([image_path])
+    result = run_pipeline([image_path], run_expiry=False)
     assert result.normalized_gtin_14 == expected, (
         f"{image_path.name}: expected normalized GTIN-14 {expected}, "
         f"got {result.normalized_gtin_14!r}; decoded={result.stages.get('barcodes_decoded')}"
