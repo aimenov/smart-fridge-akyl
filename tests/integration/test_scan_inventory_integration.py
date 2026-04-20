@@ -14,7 +14,7 @@ from tests.conftest import make_test_jpeg_bytes
 def test_scan_confirm_inventory_recipes_chain(client):
     jpeg = make_test_jpeg_bytes()
     up = client.post(
-        "/api/scan/upload?phase=product",
+        "/api/scan/upload",
         files=[("files", ("frame.jpg", BytesIO(jpeg), "image/jpeg"))],
     )
     assert up.status_code == 200
@@ -47,7 +47,7 @@ def test_scan_confirm_inventory_recipes_chain(client):
 @pytest.mark.integration
 def test_patch_item_then_list_reflects(client):
     jpeg = make_test_jpeg_bytes(text="PATCH 2099-01-01")
-    up = client.post("/api/scan/upload?phase=product", files=[("files", ("x.jpg", BytesIO(jpeg), "image/jpeg"))])
+    up = client.post("/api/scan/upload", files=[("files", ("x.jpg", BytesIO(jpeg), "image/jpeg"))])
     sid = up.json()["scan_id"]
     cf = client.post(
         "/api/scan/confirm",

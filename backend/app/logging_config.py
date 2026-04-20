@@ -10,16 +10,11 @@ from pathlib import Path
 from backend.app.config import settings
 
 SUMMARY_LOGGER_NAME = "smart_fridge.summary"
-EXPIRY_LOGGER_NAME = "smart_fridge.expiry"
 
 
 def get_summary_logger() -> logging.Logger:
     """One-line scan outcomes (barcode + product guess); mirrored to the log file."""
     return logging.getLogger(SUMMARY_LOGGER_NAME)
-
-def get_expiry_logger() -> logging.Logger:
-    """Expiry recognition milestones; mirrored to the log file."""
-    return logging.getLogger(EXPIRY_LOGGER_NAME)
 
 
 def setup_logging(level: str = "INFO", *, json_logs: bool = False) -> None:
@@ -89,14 +84,3 @@ def setup_logging(level: str = "INFO", *, json_logs: bool = False) -> None:
     sum_brief.setFormatter(logging.Formatter("%(message)s"))
     sum_log.addHandler(sum_brief)
     sum_log.addHandler(file_handler)
-
-    exp_log = logging.getLogger(EXPIRY_LOGGER_NAME)
-    for h in exp_log.handlers[:]:
-        exp_log.removeHandler(h)
-    exp_log.setLevel(logging.INFO)
-    exp_log.propagate = False
-    exp_brief = logging.StreamHandler(sys.stderr)
-    exp_brief.setLevel(logging.INFO)
-    exp_brief.setFormatter(logging.Formatter("%(message)s"))
-    exp_log.addHandler(exp_brief)
-    exp_log.addHandler(file_handler)

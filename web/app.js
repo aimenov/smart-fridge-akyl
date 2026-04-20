@@ -127,7 +127,12 @@ function isExpiryIdentified(data) {
   if (!data) return false;
   const exp = data.normalized_date;
   if (!exp || String(exp).trim() === "") return false;
-  return isExpiryLocked(data);
+  const tier = data.confidence_tier || "low";
+  const conf = scanConfidence(data);
+  if (tier === "high" || tier === "medium") return true;
+  if (conf >= CONFIDENCE_STOP_HIGH) return true;
+  if (conf >= CONFIDENCE_STOP_MEDIUM) return true;
+  return false;
 }
 
 function scanConfidence(data) {
@@ -142,16 +147,6 @@ function isBarcodeLocked(data) {
   const consensus = data.pipeline && data.pipeline.barcode_consensus;
   if (consensus && consensus.accepted === true) return true;
   // Fallback for older servers: rely on tier.
-  const tier = data.confidence_tier || "low";
-  return tier === "high";
-}
-
-function isExpiryLocked(data) {
-  if (!data) return false;
-  const exp = data.normalized_date;
-  if (!exp || String(exp).trim() === "") return false;
-  const consensus = data.pipeline && data.pipeline.expiry && data.pipeline.expiry.expiry_consensus;
-  if (consensus && consensus.accepted === true) return true;
   const tier = data.confidence_tier || "low";
   return tier === "high";
 }
@@ -386,7 +381,6 @@ function applyFullScanToForm(data) {
 
 function mergeExpiryFromScan(data) {
   if (!data || !data.normalized_date) return;
-  if (!isExpiryLocked(data)) return;
   const c = scanConfidence(data);
   if (!(bestExpiryConf < 0 || c >= bestExpiryConf)) return;
   bestExpiryConf = c;
@@ -396,12 +390,11 @@ function mergeExpiryFromScan(data) {
   if (data.date_type) document.getElementById("date-type").value = data.date_type;
 }
 
-async function uploadScanBlob(blob, phase) {
+async function uploadScanBlob(blob) {
   const compressed = await compressBlobForUpload(blob);
   const fd = new FormData();
   fd.append("files", compressed, "frame.jpg");
-  const ph = phase ? String(phase) : "both";
-  return xhrPostMultipart(`/api/scan/upload?phase=${encodeURIComponent(ph)}`, fd);
+  return xhrPostMultipart("/api/scan/upload", fd);
 }
 
 async function flashRingSuccess() {
@@ -445,7 +438,7 @@ async function liveScanLoop(phase) {
     while (Date.now() < ctrl.deadline && !ctrl.stopped) {
       let data;
       try {
-        data = await uploadScanBlob(await captureSingleFrame(), phase);
+        data = await uploadScanBlob(await captureSingleFrame());
       } catch (e) {
         const statusEl = document.getElementById("scan-status");
         stopLiveScanTicker();

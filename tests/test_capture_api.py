@@ -9,7 +9,7 @@ def test_scan_upload_returns_scan_id(client):
         ("files", ("a.jpg", BytesIO(jpeg), "image/jpeg")),
         ("files", ("b.jpg", BytesIO(jpeg), "image/jpeg")),
     ]
-    r = client.post("/api/scan/upload?phase=product", files=files)
+    r = client.post("/api/scan/upload", files=files)
     assert r.status_code == 200
     data = r.json()
     assert "scan_id" in data
@@ -20,7 +20,7 @@ def test_scan_upload_returns_scan_id(client):
 def test_scan_confirm_roundtrip(client):
     jpeg = make_test_jpeg_bytes()
     up = client.post(
-        "/api/scan/upload?phase=product",
+        "/api/scan/upload",
         files=[("files", ("x.jpg", BytesIO(jpeg), "image/jpeg"))],
     )
     scan_id = up.json()["scan_id"]

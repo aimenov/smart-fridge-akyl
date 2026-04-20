@@ -69,7 +69,6 @@ def _degraded_pipeline_result(reason: str) -> PipelineResult:
 @router.post("/scan/upload", response_model=ScanUploadResponse)
 async def upload_scan(
     files: list[UploadFile] = File(...),
-    phase: str = "product",
     db: Session = Depends(get_db),
 ):
     trace_token = begin_trace(str(uuid.uuid4()))
@@ -93,8 +92,7 @@ async def upload_scan(
         # behaviour healthier and avoids starving other requests on single-worker uvicorn).
         paths = await asyncio.to_thread(vision_pipeline.persist_frames, chunks)
         try:
-            run_expiry = phase.strip().lower() != "product"
-            result = await asyncio.to_thread(vision_pipeline.run_pipeline, paths, run_expiry=run_expiry)
+            result = await asyncio.to_thread(vision_pipeline.run_pipeline, paths)
         except Exception:
             logger.exception("run_pipeline crashed; returning degraded scan")
             result = _degraded_pipeline_result("pipeline_exception")
