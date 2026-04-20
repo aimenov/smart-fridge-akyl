@@ -14,6 +14,7 @@ from backend.app.config import settings
 from backend.app.models.entities import DateType
 from backend.app.modules.barcode_decode import BarcodeCandidate, decode_barcodes_best
 from backend.app.modules.barcode_gtin import normalize_barcode_to_gtin14
+from backend.app.modules.expiry_date import detect_expiry_date
 logger = logging.getLogger(__name__)
 
 
@@ -219,10 +220,20 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
     stages["qr_codes"] = qr_strings
     stages["barcode_consensus"] = consensus_dbg
 
-    timing_ms["ocr_ms"] = 0.0
-    stages["ocr_engine"] = "absent"
-    stages["tier"] = "high" if display_barcode else "low"
-    conf = 0.93 if display_barcode else 0.0
+    # Expiry/date OCR (fast; users typically crop the printed date area).
+    t_ocr0 = time.perf_counter()
+    expiry = detect_expiry_date(images_bgr[0])
+    timing_ms["ocr_ms"] = (time.perf_counter() - t_ocr0) * 1000.0
+    stages["ocr_engine"] = "rapidocr"
+    stages["expiry"] = expiry.stages
+
+    # Confidence and tier: barcode and expiry are separate signals; keep it simple for now.
+    conf = 0.0
+    if display_barcode:
+        conf = max(conf, 0.93)
+    if expiry.normalized_date:
+        conf = max(conf, float(min(0.92, max(0.0, expiry.confidence))))
+    stages["tier"] = "high" if conf >= 0.85 else ("medium" if conf >= 0.5 else "low")
 
     elapsed = time.perf_counter() - t0
     timing_ms["total"] = elapsed * 1000.0
@@ -243,10 +254,12 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
         barcode_raw=barcode_raw,
         barcode_symbology=symbology,
         normalized_gtin_14=normalized,
-        raw_ocr_text="",
-        date_type=DateType.unknown,
-        raw_date_text=None,
-        normalized_date=None,
+        raw_ocr_text=" ".join(
+            [str(x.get("text", "")) for x in (expiry.stages.get("raw_hits_head") or []) if isinstance(x, dict)]
+        ).strip(),
+        date_type=expiry.date_type,
+        raw_date_text=expiry.raw_text,
+        normalized_date=expiry.normalized_date,
         confidence=float(conf),
         stages=stages,
         product_name_guess=None,

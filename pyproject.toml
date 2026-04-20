@@ -19,6 +19,7 @@ dependencies = [
   "apscheduler>=3.10.4",
   "opencv-python-headless>=4.10.0",
   "numpy>=2.0.0",
+  "rapidocr-onnxruntime>=1.4.4",
 ]
 
 [project.optional-dependencies]
