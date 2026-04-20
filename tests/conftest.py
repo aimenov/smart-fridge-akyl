@@ -19,12 +19,13 @@ os.environ.setdefault("SMART_FRIDGE_UPLOADS_STORAGE", str(_root_path / "uploads"
 os.environ.setdefault("SMART_FRIDGE_LOG_LEVEL", "WARNING")
 os.environ.setdefault("SMART_FRIDGE_DEV_HTTPS", "false")
 os.environ.setdefault("SMART_FRIDGE_VLM_ENABLED", "false")
+os.environ.setdefault("SMART_FRIDGE_LOG_FILE", str(_root_path / "smart-fridge-test.log"))
 
 from fastapi.testclient import TestClient
 
 from backend.app.database import SessionLocal, init_db
 from backend.app.main import app
-from backend.app.models.entities import AppSetting, Item, Product, ScanRecord
+from backend.app.models.entities import AppSetting, BarcodeAlias, Item, Product, ProductsMaster, ScanAudit, ScanRecord
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -36,9 +37,12 @@ def _init_db_once() -> None:
 def _clean_tables() -> Generator[None, None, None]:
     db = SessionLocal()
     try:
+        db.query(ScanAudit).delete()
         db.query(ScanRecord).delete()
         db.query(Item).delete()
         db.query(Product).delete()
+        db.query(BarcodeAlias).delete()
+        db.query(ProductsMaster).delete()
         db.query(AppSetting).delete()
         db.commit()
     finally:

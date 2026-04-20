@@ -1,50 +1,86 @@
-"""Central logging setup for the Smart Fridge backend."""
+"""Central logging: verbose rotating file + quiet console + short scan summary lines."""
 
 from __future__ import annotations
 
 import logging
-import logging.config
 import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+from backend.app.config import settings
+
+SUMMARY_LOGGER_NAME = "smart_fridge.summary"
+
+
+def get_summary_logger() -> logging.Logger:
+    """One-line scan outcomes (barcode + product guess); mirrored to the log file."""
+    return logging.getLogger(SUMMARY_LOGGER_NAME)
 
 
 def setup_logging(level: str = "INFO", *, json_logs: bool = False) -> None:
     """
-    Configure root logging and standard library noise reduction.
-    `level`: DEBUG, INFO, WARNING, ERROR.
+    - **File** (see ``settings.log_file``): full timestamps and logger names (trace-style detail stays here).
+    - **Console**: WARNING and above only — avoids trace-id noise.
+    - **Summary** logger: INFO, plain ``%(message)s`` on stderr + same lines in the log file.
     """
     lvl = getattr(logging, level.upper(), logging.INFO)
+    console_lvl = getattr(
+        logging, settings.console_log_level.upper(), logging.WARNING
+    )
 
     if json_logs:
-        fmt = '{"time":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}'
+        fmt_file = '{"time":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}'
         datefmt = None
     else:
-        fmt = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+        fmt_file = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
         datefmt = "%Y-%m-%d %H:%M:%S"
 
-    logging.config.dictConfig(
-        {
-            "version": 1,
-            "disable_existing_loggers": False,
-            "formatters": {
-                "standard": {"format": fmt, "datefmt": datefmt},
-            },
-            "handlers": {
-                "console": {
-                    "class": "logging.StreamHandler",
-                    "stream": sys.stdout,
-                    "formatter": "standard",
-                    "level": lvl,
-                },
-            },
-            "loggers": {
-                "sqlalchemy.engine": {"level": "WARNING", "handlers": ["console"], "propagate": False},
-                "sqlalchemy.pool": {"level": "WARNING", "handlers": ["console"], "propagate": False},
-                "uvicorn": {"level": "INFO", "handlers": ["console"], "propagate": False},
-                "uvicorn.access": {"level": "INFO", "handlers": ["console"], "propagate": False},
-                "httpx": {"level": "WARNING", "handlers": ["console"], "propagate": False},
-                "httpcore": {"level": "WARNING", "handlers": ["console"], "propagate": False},
-                "apscheduler": {"level": "INFO", "handlers": ["console"], "propagate": False},
-            },
-            "root": {"level": lvl, "handlers": ["console"]},
-        }
+    log_path = Path(settings.log_file).expanduser()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    root = logging.getLogger()
+    for h in root.handlers[:]:
+        root.removeHandler(h)
+
+    file_handler = RotatingFileHandler(
+        str(log_path),
+        maxBytes=max(100_000, settings.log_file_max_bytes),
+        backupCount=max(1, settings.log_file_backup_count),
+        encoding="utf-8",
     )
+    file_lvl = getattr(logging, settings.file_log_level.upper(), logging.DEBUG)
+    file_handler.setLevel(file_lvl)
+    file_handler.setFormatter(logging.Formatter(fmt_file, datefmt=datefmt))
+
+    console_handler = logging.StreamHandler(sys.stderr)
+    console_handler.setLevel(console_lvl)
+    console_handler.setFormatter(
+        logging.Formatter("%(levelname)s | %(name)s | %(message)s")
+    )
+
+    # Root DEBUG so ``logger.debug`` from app code reaches the file; console handler still filters.
+    root.setLevel(logging.DEBUG)
+    root.addHandler(file_handler)
+    root.addHandler(console_handler)
+
+    for name in (
+        "sqlalchemy.engine",
+        "sqlalchemy.pool",
+        "uvicorn",
+        "uvicorn.access",
+        "httpx",
+        "httpcore",
+        "apscheduler",
+    ):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+    sum_log = logging.getLogger(SUMMARY_LOGGER_NAME)
+    for h in sum_log.handlers[:]:
+        sum_log.removeHandler(h)
+    sum_log.setLevel(logging.INFO)
+    sum_log.propagate = False
+    sum_brief = logging.StreamHandler(sys.stderr)
+    sum_brief.setLevel(logging.INFO)
+    sum_brief.setFormatter(logging.Formatter("%(message)s"))
+    sum_log.addHandler(sum_brief)
+    sum_log.addHandler(file_handler)

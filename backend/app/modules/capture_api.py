@@ -12,12 +12,13 @@ from sqlalchemy.orm import Session
 
 from backend.app.config import settings
 from backend.app.database import get_db
-from backend.app.models.entities import DateType, ItemLocation, ScanRecord
-from backend.app.modules import inventory_service, vision_pipeline
+from backend.app.models.entities import DateType, ItemLocation, ScanAudit, ScanRecord
+from backend.app.modules import inventory_service, national_catalog, vision_pipeline
 from backend.app.modules.inventory_service import CONFIDENCE_HIGH, CONFIDENCE_MEDIUM
 from backend.app.modules.vision_pipeline import PipelineResult
 from backend.app.json_safe import json_safe
-from backend.app.observability import begin_trace, end_trace, trace_prefix
+from backend.app.logging_config import get_summary_logger
+from backend.app.observability import begin_trace, end_trace
 
 from backend.app.schemas.dto import (
     ConfirmScanRequest,
@@ -27,6 +28,7 @@ from backend.app.schemas.dto import (
 )
 
 logger = logging.getLogger(__name__)
+summary = get_summary_logger()
 
 router = APIRouter(prefix="/api", tags=["capture"])
 
@@ -52,6 +54,9 @@ def _degraded_pipeline_result(reason: str) -> PipelineResult:
     """Vision pipeline failed; return a safe empty result so the client still gets HTTP 200."""
     return PipelineResult(
         barcode=None,
+        barcode_raw=None,
+        barcode_symbology=None,
+        normalized_gtin_14=None,
         raw_ocr_text="",
         date_type=DateType.unknown,
         raw_date_text=None,
@@ -75,9 +80,8 @@ async def upload_scan(
             if raw:
                 chunks.append((f.filename or "frame.jpg", raw))
         total_bytes = sum(len(c[1]) for c in chunks)
-        logger.info(
-            "%sPOST /api/scan/upload start | frames=%d total_bytes=%d",
-            trace_prefix(),
+        logger.debug(
+            "POST /api/scan/upload start | frames=%d total_bytes=%d",
             len(chunks),
             total_bytes,
         )
@@ -90,23 +94,53 @@ async def upload_scan(
         try:
             result = await asyncio.to_thread(vision_pipeline.run_pipeline, paths)
         except Exception:
-            logger.exception("%srun_pipeline crashed; returning degraded scan", trace_prefix())
+            logger.exception("run_pipeline crashed; returning degraded scan")
             result = _degraded_pipeline_result("pipeline_exception")
 
-        logger.info(
-            "%sOCR path result: conf=%.3f tier=%s barcode=%s date=%s",
-            trace_prefix(),
-            result.confidence,
+        logger.debug(
+            "pipeline tier=%s barcode=%s gtin14=%s date=%s conf=%.3f",
             result.stages.get("tier"),
             result.barcode,
+            result.normalized_gtin_14,
             result.normalized_date,
+            result.confidence,
         )
 
+        master_row, catalog_name, lookup_key = national_catalog.resolve_product_for_scan(
+            db,
+            normalized_gtin_14=result.normalized_gtin_14,
+            raw_barcode=(result.barcode_raw or result.barcode or "").strip(),
+            symbology=result.barcode_symbology,
+        )
+        product_label = catalog_name or result.product_name_guess or "Unknown product"
+        catalog_hit = master_row is not None
+
         safe_stages = json_safe(result.stages)
+        if isinstance(safe_stages, dict):
+            safe_stages["catalog_match"] = catalog_hit
+            safe_stages["catalog_lookup_key"] = lookup_key
+
+        scan_name = catalog_name or "—"
+        summary.info(
+            "SCAN | barcode=%s | gtin14=%s | lookup_key=%s | product=%s | catalog=%s",
+            result.barcode_raw or "—",
+            result.normalized_gtin_14 or "—",
+            lookup_key or "—",
+            product_label,
+            scan_name if catalog_hit else ("miss" if lookup_key else "skip"),
+        )
+
         scan = ScanRecord(
             captured_image_paths=[str(p) for p in paths],
             ocr_text=result.raw_ocr_text,
-            model_outputs={"barcode": result.barcode},
+            model_outputs={
+                "barcode": result.barcode,
+                "barcode_raw": result.barcode_raw,
+                "normalized_gtin_14": lookup_key or result.normalized_gtin_14,
+                "catalog_name_ru": catalog_name,
+                "catalog_lookup_key": lookup_key,
+                "catalog_match": catalog_hit,
+            },
             pipeline_stages=safe_stages if isinstance(safe_stages, dict) else {},
             parsed_date_type=result.date_type if result.date_type != DateType.unknown else None,
             raw_date_text=result.raw_date_text,
@@ -116,9 +150,25 @@ async def upload_scan(
         db.add(scan)
         db.flush()
 
+        db.add(
+            ScanAudit(
+                scan_record_id=scan.id,
+                decoded_barcode=result.barcode_raw,
+                normalized_gtin_14=lookup_key or result.normalized_gtin_14,
+                symbology=result.barcode_symbology,
+                ocr_text=result.raw_ocr_text,
+                parsed_date=result.normalized_date,
+                confidence=result.confidence,
+                user_corrections={},
+            )
+        )
+
+        cat_path = master_row.category_path[:128] if master_row and master_row.category_path else None
         product_guess = ProductCreate(
-            canonical_name=result.product_name_guess or "Unknown product",
-            barcode=result.barcode,
+            canonical_name=product_label,
+            barcode=(lookup_key or result.normalized_gtin_14 or result.barcode),
+            brand=master_row.brand if master_row else None,
+            category=cat_path,
         )
 
         conf = float(result.confidence)
@@ -135,19 +185,20 @@ async def upload_scan(
             raw_date_text=result.raw_date_text,
             normalized_date=result.normalized_date,
             barcode=result.barcode,
+            catalog_lookup_key=lookup_key,
+            catalog_match=catalog_hit,
             ocr_text_preview=_ocr_preview(result.raw_ocr_text or ""),
             pipeline=safe_stages if isinstance(safe_stages, dict) else {},
         )
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("%sscan/upload failed", trace_prefix())
+        logger.exception("scan/upload failed")
         raise HTTPException(status_code=500, detail=str(e)) from e
     finally:
         elapsed = time.perf_counter() - t_request
-        logger.info(
-            "%sPOST /api/scan/upload finished in %.2fs (DB record id above in response scan_id)",
-            trace_prefix(),
+        logger.debug(
+            "POST /api/scan/upload finished in %.2fs scan_id implicit in response",
             elapsed,
         )
         end_trace(trace_token)
@@ -155,8 +206,8 @@ async def upload_scan(
 
 @router.post("/scan/confirm", response_model=ItemOut)
 def confirm_scan(body: ConfirmScanRequest, db: Session = Depends(get_db)):
-    logger.info(
-        "confirm scan_id=%s product=%r qty=%s expiry=%s",
+    summary.info(
+        "CONFIRM | scan_id=%s | product=%s | qty=%s | expiry=%s",
         body.scan_id,
         body.product.canonical_name,
         body.quantity,

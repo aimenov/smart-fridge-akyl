@@ -8,8 +8,99 @@ import sys
 from pathlib import Path
 
 
+def _cmd_import_ofd(argv: list[str]) -> None:
+    """Pull ОФД export pages into ``products_master`` (see Postman doc linked from NCT)."""
+    import argparse
+    import time
+
+    from backend.app.config import settings
+    from backend.app.database import SessionLocal, init_db
+    from backend.app.modules.ofd_catalog_import import build_initial_export_url, import_ofd_catalog
+
+    ap = argparse.ArgumentParser(prog="smart-fridge import-ofd")
+    ap.add_argument(
+        "--from-ts",
+        type=int,
+        default=None,
+        help="Unix ``from`` watermark for the first request (default: now − since-days)",
+    )
+    ap.add_argument(
+        "--since-days",
+        type=float,
+        default=None,
+        help="Used when --from-ts is omitted (default: SMART_FRIDGE_OFD_IMPORT_DEFAULT_SINCE_DAYS)",
+    )
+    ap.add_argument(
+        "--max-pages",
+        type=int,
+        default=50,
+        help="Pagination safety cap; use 0 for no limit (millions of rows — be careful)",
+    )
+    ap.add_argument(
+        "--max-rows",
+        type=int,
+        default=None,
+        help="Optional cap on rows processed across pages",
+    )
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Fetch and parse but roll back DB changes each page",
+    )
+    ap.add_argument(
+        "--sleep",
+        type=float,
+        default=None,
+        help="Seconds to sleep between HTTP pages (default: SMART_FRIDGE_OFD_CATALOG_SLEEP_SECONDS_BETWEEN_PAGES)",
+    )
+    args = ap.parse_args(argv)
+
+    from_ts = args.from_ts
+    if from_ts is None:
+        days = (
+            args.since_days
+            if args.since_days is not None
+            else settings.ofd_import_default_since_days
+        )
+        from_ts = int(time.time()) - int(days * 86400)
+
+    max_pages = None if args.max_pages <= 0 else args.max_pages
+    sleep_s = (
+        args.sleep
+        if args.sleep is not None
+        else settings.ofd_catalog_sleep_seconds_between_pages
+    )
+
+    init_db()
+    url = build_initial_export_url(from_timestamp=from_ts)
+    print("smart-fridge import-ofd: first URL\n  " + url, file=sys.stderr)
+
+    db = SessionLocal()
+    try:
+        stats = import_ofd_catalog(
+            db,
+            start_url=url,
+            max_pages=max_pages,
+            max_rows=args.max_rows,
+            dry_run=args.dry_run,
+            sleep_seconds=float(sleep_s),
+        )
+    finally:
+        db.close()
+
+    print(
+        "smart-fridge import-ofd: done — pages={pages} rows_seen={rows_seen} "
+        "upserts={upserts} skipped={skipped}".format(**stats),
+        file=sys.stderr,
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     argv = argv if argv is not None else sys.argv[1:]
+    if argv and argv[0] == "import-ofd":
+        _cmd_import_ofd(argv[1:])
+        return
+
     p = argparse.ArgumentParser(prog="smart-fridge", description="Smart Fridge local API + web UI")
     p.add_argument(
         "command",

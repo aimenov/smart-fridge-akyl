@@ -48,6 +48,9 @@ class ScanUploadResponse(BaseModel):
     raw_date_text: Optional[str] = None
     normalized_date: Optional[str] = None
     barcode: Optional[str] = None
+    #: 14-char key used for catalog / OFD lookup (may differ from raw scan when checksum failed).
+    catalog_lookup_key: Optional[str] = None
+    catalog_match: bool = False
     #: Short excerpt of combined OCR for debugging low-confidence reads (optional).
     ocr_text_preview: Optional[str] = None
     pipeline: dict[str, Any] = Field(default_factory=dict)
