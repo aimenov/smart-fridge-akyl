@@ -127,12 +127,7 @@ function isExpiryIdentified(data) {
   if (!data) return false;
   const exp = data.normalized_date;
   if (!exp || String(exp).trim() === "") return false;
-  const tier = data.confidence_tier || "low";
-  const conf = scanConfidence(data);
-  if (tier === "high" || tier === "medium") return true;
-  if (conf >= CONFIDENCE_STOP_HIGH) return true;
-  if (conf >= CONFIDENCE_STOP_MEDIUM) return true;
-  return false;
+  return isExpiryLocked(data);
 }
 
 function scanConfidence(data) {
@@ -147,6 +142,16 @@ function isBarcodeLocked(data) {
   const consensus = data.pipeline && data.pipeline.barcode_consensus;
   if (consensus && consensus.accepted === true) return true;
   // Fallback for older servers: rely on tier.
+  const tier = data.confidence_tier || "low";
+  return tier === "high";
+}
+
+function isExpiryLocked(data) {
+  if (!data) return false;
+  const exp = data.normalized_date;
+  if (!exp || String(exp).trim() === "") return false;
+  const consensus = data.pipeline && data.pipeline.expiry && data.pipeline.expiry.expiry_consensus;
+  if (consensus && consensus.accepted === true) return true;
   const tier = data.confidence_tier || "low";
   return tier === "high";
 }
@@ -381,6 +386,7 @@ function applyFullScanToForm(data) {
 
 function mergeExpiryFromScan(data) {
   if (!data || !data.normalized_date) return;
+  if (!isExpiryLocked(data)) return;
   const c = scanConfidence(data);
   if (!(bestExpiryConf < 0 || c >= bestExpiryConf)) return;
   bestExpiryConf = c;

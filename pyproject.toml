@@ -7,7 +7,7 @@ name = "smart-fridge"
 version = "0.1.0"
 description = "Personal fridge inventory, expiry tracking, and recipe hints"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"
 dependencies = [
   "fastapi>=0.115.0",
   "uvicorn[standard]>=0.32.0",
@@ -19,6 +19,8 @@ dependencies = [
   "apscheduler>=3.10.4",
   "opencv-python-headless>=4.10.0",
   "numpy>=2.0.0",
+  "paddleocr",
+  "paddlepaddle<3.3",
 ]
 
 [project.optional-dependencies]

@@ -14,6 +14,7 @@ from backend.app.config import settings
 from backend.app.models.entities import DateType
 from backend.app.modules.barcode_decode import BarcodeCandidate, decode_barcodes_best
 from backend.app.modules.barcode_gtin import normalize_barcode_to_gtin14
+from backend.app.modules.expiry_date import extract_expiry
 logger = logging.getLogger(__name__)
 
 
@@ -219,10 +220,19 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
     stages["qr_codes"] = qr_strings
     stages["barcode_consensus"] = consensus_dbg
 
-    timing_ms["ocr_ms"] = 0.0
-    stages["ocr_engine"] = "absent"
-    stages["tier"] = "high" if display_barcode else "low"
-    conf = 0.93 if display_barcode else 0.0
+    # Expiry OCR (PaddleOCR + CV preprocessing + parsing + consensus)
+    t_exp0 = time.perf_counter()
+    exp = extract_expiry(images_bgr)
+    timing_ms["expiry_ms"] = (time.perf_counter() - t_exp0) * 1000.0
+    stages["expiry"] = exp.stages
+
+    # Do not surface low-confidence expiry guesses (same principle as barcode).
+    normalized_date = exp.normalized_date
+    raw_date_text = exp.raw_date_text
+    date_type = exp.date_type
+
+    stages["tier"] = "high" if (display_barcode or normalized_date) else "low"
+    conf = 0.93 if display_barcode else (float(exp.confidence) if normalized_date else 0.0)
 
     elapsed = time.perf_counter() - t0
     timing_ms["total"] = elapsed * 1000.0
@@ -244,9 +254,9 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
         barcode_symbology=symbology,
         normalized_gtin_14=normalized,
         raw_ocr_text="",
-        date_type=DateType.unknown,
-        raw_date_text=None,
-        normalized_date=None,
+        date_type=date_type or DateType.unknown,
+        raw_date_text=raw_date_text,
+        normalized_date=normalized_date,
         confidence=float(conf),
         stages=stages,
         product_name_guess=None,
