@@ -325,6 +325,40 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function estimateFrameSharpness(canvas, w, h) {
+  // Fast blur metric (edge energy) on a downscaled grayscale image.
+  // Returns ~0..50+; higher is sharper.
+  const sw = Math.max(64, Math.min(180, Math.round(w / 6)));
+  const sh = Math.max(64, Math.min(180, Math.round(h / 6)));
+  const tmp = document.createElement("canvas");
+  tmp.width = sw;
+  tmp.height = sh;
+  const tctx = tmp.getContext("2d", { willReadFrequently: true });
+  tctx.drawImage(canvas, 0, 0, w, h, 0, 0, sw, sh);
+  const img = tctx.getImageData(0, 0, sw, sh).data;
+  let acc = 0;
+  let n = 0;
+  // Sample a subset of pixels to keep this cheap.
+  const step = 2;
+  for (let y = 1; y < sh - 1; y += step) {
+    for (let x = 1; x < sw - 1; x += step) {
+      const i = (y * sw + x) * 4;
+      const g = (img[i] * 3 + img[i + 1] * 6 + img[i + 2]) / 10;
+      const il = (y * sw + (x - 1)) * 4;
+      const ir = (y * sw + (x + 1)) * 4;
+      const iu = ((y - 1) * sw + x) * 4;
+      const id = ((y + 1) * sw + x) * 4;
+      const gl = (img[il] * 3 + img[il + 1] * 6 + img[il + 2]) / 10;
+      const gr = (img[ir] * 3 + img[ir + 1] * 6 + img[ir + 2]) / 10;
+      const gu = (img[iu] * 3 + img[iu + 1] * 6 + img[iu + 2]) / 10;
+      const gd = (img[id] * 3 + img[id + 1] * 6 + img[id + 2]) / 10;
+      acc += Math.abs(gr - gl) + Math.abs(gd - gu);
+      n += 1;
+    }
+  }
+  return n ? acc / n / 10 : 0;
+}
+
 async function captureSingleFrame() {
   const video = videoEl;
   const canvas = document.getElementById("snap-canvas");
@@ -460,6 +494,7 @@ async function liveScanLoop(phase) {
     expiryVotes = {};
     expiryBestConfByDate = {};
     expiryLocked = false;
+    ctrl.expirySkipStreak = 0;
   }
   if (phase === "product") {
     autoFilledName = true;
@@ -470,7 +505,34 @@ async function liveScanLoop(phase) {
     while (Date.now() < ctrl.deadline && !ctrl.stopped) {
       let data;
       try {
-        data = await uploadScanBlob(await captureSingleFrame(), phase);
+        // Skip obviously-blurry frames during expiry scanning (prevents early guaranteed misses).
+        if (phase === "expiry") {
+          const canvas = document.getElementById("snap-canvas");
+          const video = videoEl;
+          await waitVideoReady(video);
+          const w = video.videoWidth;
+          const h = video.videoHeight;
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(video, 0, 0, w, h);
+          const sharp = estimateFrameSharpness(canvas, w, h);
+          // If we keep skipping (low light / motion), fall back to uploading anyway so the user isn't stuck.
+          const minSharp = 4.2;
+          if (sharp < minSharp) {
+            ctrl.expirySkipStreak = (ctrl.expirySkipStreak || 0) + 1;
+            if (ctrl.expirySkipStreak < 8) {
+              await sleep(Math.min(140, LIVE_SCAN_MIN_GAP_MS));
+              continue;
+            }
+          }
+          ctrl.expirySkipStreak = 0;
+          const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.8));
+          if (!blob || blob.size < 100) throw new Error("Captured frame was empty — hold steady and try again.");
+          data = await uploadScanBlob(blob, phase);
+        } else {
+          data = await uploadScanBlob(await captureSingleFrame(), phase);
+        }
       } catch (e) {
         const statusEl = document.getElementById("scan-status");
         stopLiveScanTicker();

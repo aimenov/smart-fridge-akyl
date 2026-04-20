@@ -157,40 +157,15 @@ def detect_expiry_date(bgr: np.ndarray, *, fast: bool = False) -> ExpiryDetectio
     (common label layout: produced on top, expiry/use-by below).
     """
     ocr = _get_ocr()
-    # In fast mode, keep 2 ROIs: full + likely top-right. This stays fast but avoids missing centered prints.
-    rois: list[tuple[str, np.ndarray]] = [("full", bgr)]
-    h, w = bgr.shape[:2]
-    if fast and h >= 40 and w >= 40:
-        rois.append(("tr_70", bgr[0 : int(h * 0.75), int(w * 0.20) : w]))
-
-    variants: list[tuple[str, np.ndarray]] = []
-    for roi_tag, roi in rois:
-        for vtag, img in _prep_variants(roi, fast=fast):
-            # Fast mode: keep only a couple passes per ROI.
-            if fast and vtag not in ("gray", "sharp", "ath"):
-                continue
-            variants.append((f"{roi_tag}_{vtag}", img))
     year_now = date.today().year
-
     today = date.today()
-    candidates: list[dict[str, Any]] = []
-    raw_hits: list[dict[str, Any]] = []
 
-    for tag, g in variants:
-        try:
-            # RapidOCR expects RGB or BGR; grayscale works too but we pass 3ch for consistency.
-            if g.ndim == 2:
-                img = cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
-            else:
-                img = g
-            res, _ = ocr(img)
-        except Exception as e:
-            logger.debug("expiry OCR variant failed tag=%s err=%s", tag, e)
-            continue
-
+    def parse_ocr_results(tag: str, res: Any, *, img_h: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Return (candidates, raw_hits) from RapidOCR result list."""
+        local_cands: list[dict[str, Any]] = []
+        local_hits: list[dict[str, Any]] = []
         if not res:
-            continue
-
+            return local_cands, local_hits
         for det in res:
             # det: [box, text, score]
             if not isinstance(det, (list, tuple)) or len(det) < 3:
@@ -221,7 +196,7 @@ def detect_expiry_date(bgr: np.ndarray, *, fast: bool = False) -> ExpiryDetectio
                 sc = 0.0
 
             y = _center_y(np.asarray(box))
-            raw_hits.append({"tag": tag, "text": t, "score": round(sc, 3), "y": round(y, 1)})
+            local_hits.append({"tag": tag, "text": t, "score": round(sc, 3), "y": round(y, 1)})
 
             # Extract dates from the text token(s).
             has_time = bool(_RE_TIME.search(t_norm))
@@ -241,12 +216,12 @@ def detect_expiry_date(bgr: np.ndarray, *, fast: bool = False) -> ExpiryDetectio
                 future_bias = (delta_days / 3650.0) * 22.0
                 cand_score = (
                     sc * 100.0
-                    + (y / max(1.0, float(bgr.shape[0]))) * 60.0
+                    + (y / max(1.0, float(img_h))) * 60.0
                     + year_bias
                     + time_penalty
                     + future_bias
                 )
-                candidates.append(
+                local_cands.append(
                     {
                         "tag": tag,
                         "raw": token,
@@ -258,6 +233,109 @@ def detect_expiry_date(bgr: np.ndarray, *, fast: bool = False) -> ExpiryDetectio
                         "has_time": has_time,
                     }
                 )
+        return local_cands, local_hits
+
+    def run_ocr_one(tag: str, g: np.ndarray) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        try:
+            if g.ndim == 2:
+                img = cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
+            else:
+                img = g
+            res, _ = ocr(img)
+        except Exception as e:
+            logger.debug("expiry OCR variant failed tag=%s err=%s", tag, e)
+            return [], []
+        h_img = g.shape[0] if g.ndim >= 2 else 1
+        return parse_ocr_results(tag, res, img_h=h_img)
+
+    # Build ROI list.
+    rois: list[tuple[str, np.ndarray]] = [("full", bgr)]
+    h, w = bgr.shape[:2]
+    if h >= 40 and w >= 40:
+        rois.insert(0, ("tr_70", bgr[0 : int(h * 0.75), int(w * 0.20) : w]))
+
+    candidates: list[dict[str, Any]] = []
+    raw_hits: list[dict[str, Any]] = []
+
+    if fast:
+        # Lightning-fast path: try a small number of OCR passes and short-circuit on a strong expiry hit.
+        # Order matters: sharp is usually best for dot-matrix; then ath; fall back to gray.
+        plan = ("sharp", "ath", "gray")
+        # Try top-right first; only fall back to full frame if nothing found.
+        for roi_tag, roi in rois[:1]:
+            for vtag, img in _prep_variants(roi, fast=True):
+                if vtag not in plan:
+                    continue
+                tag = f"{roi_tag}_{vtag}"
+                cands, hits = run_ocr_one(tag, img)
+                raw_hits.extend(hits)
+                candidates.extend(cands)
+                # Short-circuit: any non-time future-ish date with decent OCR score.
+                for c in cands:
+                    dt = c.get("dt")
+                    if not isinstance(dt, date):
+                        continue
+                    if c.get("has_time"):
+                        continue
+                    if dt < today:
+                        continue
+                    if float(c.get("ocr_score") or 0.0) >= 0.75:
+                        # Keep stages small in fast mode.
+                        stages = {
+                            "variants_tried": 1,
+                            "raw_hits_head": raw_hits[:24],
+                            "candidates": [c],
+                        }
+                        conf = float(min(0.98, max(0.0, float(c["ocr_score"]) * 0.95 + 0.15)))
+                        return ExpiryDetection(
+                            date_type=DateType.expiry,
+                            raw_text=str(c["raw"]),
+                            normalized_date=str(c["iso"]),
+                            confidence=conf,
+                            stages=stages,
+                        )
+            # If we saw any non-time candidates in this ROI, don't expand work further.
+            if any((not x.get("has_time")) for x in candidates):
+                break
+
+        if not candidates:
+            # Fallback: run a single sharp pass on the full frame.
+            for roi_tag, roi in rois[-1:]:
+                for vtag, img in _prep_variants(roi, fast=True):
+                    if vtag != "sharp":
+                        continue
+                    tag = f"{roi_tag}_{vtag}"
+                    cands, hits = run_ocr_one(tag, img)
+                    raw_hits.extend(hits)
+                    candidates.extend(cands)
+                    break
+    else:
+        # Full (still fast-ish) path: evaluate a richer set of variants.
+        variants: list[tuple[str, np.ndarray]] = []
+        for roi_tag, roi in rois:
+            for vtag, img in _prep_variants(roi, fast=False):
+                variants.append((f"{roi_tag}_{vtag}", img))
+        for tag, g in variants:
+            cands, hits = run_ocr_one(tag, g)
+            raw_hits.extend(hits)
+            candidates.extend(cands)
+
+    # If we only saw time-stamped (manufacturing) dates, do not return a date.
+    # This prevents the live scan from "locking" on manufacturing instead of expiry.
+    if candidates and all(bool(c.get("has_time")) for c in candidates):
+        stages = {
+            "variants_tried": 0 if fast else 0,
+            "raw_hits_head": raw_hits[:24],
+            "candidates": sorted(candidates, key=lambda c: -c["score"])[:12],
+        }
+        logger.debug("expiry: only manufacturing/time-stamped dates found; skipping")
+        return ExpiryDetection(
+            date_type=DateType.unknown,
+            raw_text=None,
+            normalized_date=None,
+            confidence=0.0,
+            stages=stages,
+        )
 
     # Post-process: if we saw a manufacturing date with time, and another date with same day/month but a lower year,
     # bump that date's year up to the manufacturing year (common dotted-matrix OCR year slip: 26 -> 25).
@@ -300,7 +378,7 @@ def detect_expiry_date(bgr: np.ndarray, *, fast: bool = False) -> ExpiryDetectio
         key=lambda c: ((not bool(c.get("has_time", False))), float(c["score"])),
     ) if candidates else None
     stages = {
-        "variants_tried": len(variants),
+        "variants_tried": (len(variants) if (not fast) else 0),
         "raw_hits_head": raw_hits[:24],
         "candidates": sorted(candidates, key=lambda c: -c["score"])[:12],
     }
