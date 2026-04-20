@@ -14,7 +14,6 @@ from backend.app.config import settings
 from backend.app.database import get_db
 from backend.app.models.entities import DateType, ItemLocation, ScanRecord
 from backend.app.modules import inventory_service, vision_pipeline
-from backend.app.modules import vlm_fallback
 from backend.app.modules.inventory_service import CONFIDENCE_HIGH, CONFIDENCE_MEDIUM
 from backend.app.modules.vision_pipeline import PipelineResult
 from backend.app.json_safe import json_safe
@@ -50,7 +49,7 @@ def _ocr_preview(raw: str, limit: int = 420) -> str:
 
 
 def _degraded_pipeline_result(reason: str) -> PipelineResult:
-    """OCR/native code failed; return a safe empty result so the client still gets HTTP 200."""
+    """Vision pipeline failed; return a safe empty result so the client still gets HTTP 200."""
     return PipelineResult(
         barcode=None,
         raw_ocr_text="",
@@ -61,10 +60,6 @@ def _degraded_pipeline_result(reason: str) -> PipelineResult:
         stages={"error": reason},
         product_name_guess=None,
     )
-
-
-VLM_SOFT_TIMEOUT_S = 60.0
-
 
 @router.post("/scan/upload", response_model=ScanUploadResponse)
 async def upload_scan(
@@ -81,17 +76,15 @@ async def upload_scan(
                 chunks.append((f.filename or "frame.jpg", raw))
         total_bytes = sum(len(c[1]) for c in chunks)
         logger.info(
-            "%sPOST /api/scan/upload start | frames=%d total_bytes=%d vlm_enabled=%s vlm_threshold=%.2f",
+            "%sPOST /api/scan/upload start | frames=%d total_bytes=%d",
             trace_prefix(),
             len(chunks),
             total_bytes,
-            settings.vlm_enabled,
-            settings.vlm_confidence_below,
         )
         if not chunks:
             raise HTTPException(400, "no image bytes in upload (empty frames)")
 
-        # CPU-heavy OpenCV / PaddleOCR must not block the asyncio loop (keeps TLS/proxy idle
+        # CPU-heavy OpenCV must not block the asyncio loop (keeps TLS/proxy idle
         # behaviour healthier and avoids starving other requests on single-worker uvicorn).
         paths = await asyncio.to_thread(vision_pipeline.persist_frames, chunks)
         try:
@@ -108,31 +101,6 @@ async def upload_scan(
             result.barcode,
             result.normalized_date,
         )
-
-        if settings.vlm_enabled and result.confidence < settings.vlm_confidence_below:
-            try:
-                raw_resp = await asyncio.wait_for(
-                    vlm_fallback.describe_product_and_expiry(paths),
-                    timeout=VLM_SOFT_TIMEOUT_S,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "%sVLM soft-timeout after %.0fs — using OCR-only result",
-                    trace_prefix(),
-                    VLM_SOFT_TIMEOUT_S,
-                )
-                raw_resp = None
-            except Exception:
-                logger.exception("%sVLM call failed; using OCR-only result", trace_prefix())
-                raw_resp = None
-            before = result.confidence
-            result = vlm_fallback.merge_pipeline_with_vlm(result, raw_resp)
-            logger.info(
-                "%sAfter VLM: confidence %.3f -> %.3f",
-                trace_prefix(),
-                before,
-                result.confidence,
-            )
 
         safe_stages = json_safe(result.stages)
         scan = ScanRecord(
@@ -167,10 +135,7 @@ async def upload_scan(
             raw_date_text=result.raw_date_text,
             normalized_date=result.normalized_date,
             barcode=result.barcode,
-            ocr_text_preview=_ocr_preview(
-                (result.stages.get("machine_read_preview") if isinstance(result.stages, dict) else "")
-                or (result.raw_ocr_text or ""),
-            ),
+            ocr_text_preview=_ocr_preview(result.raw_ocr_text or ""),
             pipeline=safe_stages if isinstance(safe_stages, dict) else {},
         )
     except HTTPException:

@@ -167,7 +167,7 @@ function formatFetchError(err) {
     m === "Failed to fetch" ||
     /networkerror|load failed/i.test(m)
   ) {
-    return "Network error — check Wi‑Fi, wait if OCR is still processing on the PC, and try again.";
+    return "Network error — check Wi‑Fi and try again.";
   }
   return m;
 }
@@ -206,7 +206,7 @@ function fillScanHero(data) {
       "Fair read — glance at Product and Expiry above, fix any mistakes in the fields, then Save.";
   } else {
     hintEl.textContent =
-      "Needs review — edit product name and expiry from the package. Optional: install PaddleOCR on the PC for sharper reads.";
+      "Needs review — edit product name and expiry from the package.";
   }
 
   if (previewEl) {
@@ -580,7 +580,7 @@ function xhrPostMultipart(path, formData) {
     xhr.onerror = () => reject(new Error(formatFetchError({ message: "Load failed" })));
 
     xhr.ontimeout = () =>
-      reject(new Error("Upload timed out — the PC may still be loading OCR; try again."));
+      reject(new Error("Upload timed out — try again."));
 
     xhr.send(formData);
   });

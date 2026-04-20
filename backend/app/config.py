@@ -31,30 +31,11 @@ class Settings(BaseSettings):
     telegram_chat_id: str = ""
     telegram_poll_seconds: int = 30
 
-    vlm_enabled: bool = False
-    vlm_endpoint: str = "http://127.0.0.1:1234/v1/chat/completions"
-    vlm_confidence_below: float = 0.50
-    #: Max chars of redacted JSON to log at INFO for VLM request/response previews.
-    vlm_log_preview_chars: int = 4000
-
     expiring_warning_days: int = 2
     duplicate_scan_window_seconds: int = 120
 
     #: Directory containing ``index.html`` for the PWA (default: discover ``web/`` upward from this package).
     web_root: Path | None = None
-
-    #: Set ``PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK`` before Paddle loads — avoids long waits / failures when “model host” is unreachable (default: on).
-    paddle_pdx_disable_model_source_check: bool = True
-
-    #: Full path to ``tesseract.exe`` when it is not on ``PATH`` (Windows e.g. ``C:/Program Files/Tesseract-OCR/tesseract.exe``).
-    tesseract_cmd: Path | None = None
-
-    #: Optional PaddleOCR ``lang`` tried first (e.g. ``multilingual``, ``ru``). If unset, tries multilingual → ru → en.
-    ocr_lang: str | None = None
-
-    #: First Tesseract ``-l`` tried; then built-in fallbacks (``rus+eng``, ``rus``, …) until one works.
-    #: Cyrillic needs ``rus.traineddata`` next to Tesseract (Windows installer includes Russian).
-    tesseract_langs: str = "rus+eng"
 
 
 settings = Settings()
