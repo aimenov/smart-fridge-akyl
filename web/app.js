@@ -125,14 +125,12 @@ function isProductIdentified(data) {
 
 function isExpiryIdentified(data) {
   if (!data) return false;
-  const exp = data.normalized_date;
+  // Prefer the best-known expiry from the form (we merge across frames).
+  const expEl = document.getElementById("expiry");
+  const expForm = expEl ? String(expEl.value || "").trim() : "";
+  const exp = expForm || data.normalized_date;
   if (!exp || String(exp).trim() === "") return false;
-  const tier = data.confidence_tier || "low";
-  const conf = scanConfidence(data);
-  if (tier === "high" || tier === "medium") return true;
-  if (conf >= CONFIDENCE_STOP_HIGH) return true;
-  if (conf >= CONFIDENCE_STOP_MEDIUM) return true;
-  return false;
+  return !!expiryLocked;
 }
 
 function scanConfidence(data) {
@@ -143,7 +141,8 @@ function scanConfidence(data) {
 function isBarcodeLocked(data) {
   if (!data) return false;
   const bc = (data.barcode != null && String(data.barcode).trim() !== "") ? String(data.barcode).trim() : "";
-  if (!bc) return false;
+  const lk = String(data.catalog_lookup_key ?? "").trim();
+  if (!bc && !lk) return false;
   const consensus = data.pipeline && data.pipeline.barcode_consensus;
   if (consensus && consensus.accepted === true) return true;
   // Fallback for older servers: rely on tier.
@@ -318,6 +317,9 @@ function wireConfirmHeroSync() {
 }
 
 let bestExpiryConf = -1;
+let expiryVotes = {};
+let expiryLocked = false;
+let expiryBestConfByDate = {};
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -382,19 +384,44 @@ function applyFullScanToForm(data) {
 function mergeExpiryFromScan(data) {
   if (!data || !data.normalized_date) return;
   const c = scanConfidence(data);
-  if (!(bestExpiryConf < 0 || c >= bestExpiryConf)) return;
-  bestExpiryConf = c;
   let exp = data.normalized_date;
   if (typeof exp === "string" && exp.length > 10) exp = exp.slice(0, 10);
-  document.getElementById("expiry").value = exp;
+
+  // Stabilize across frames: vote by normalized date, keep best confidence per date.
+  expiryVotes[exp] = (expiryVotes[exp] || 0) + 1;
+  expiryBestConfByDate[exp] = Math.max(expiryBestConfByDate[exp] || 0, c);
+
+  // Pick the current best hypothesis by (votes, best_conf).
+  let winner = null;
+  let winVotes = 0;
+  let winConf = 0;
+  for (const k of Object.keys(expiryVotes)) {
+    const v = Number(expiryVotes[k] || 0);
+    const bc = Number(expiryBestConfByDate[k] || 0);
+    if (v > winVotes || (v === winVotes && bc > winConf)) {
+      winner = k;
+      winVotes = v;
+      winConf = bc;
+    }
+  }
+  if (!winner) return;
+
+  // Lock when we have repeated agreement and at least moderate confidence.
+  // If we get a truly strong single-frame read, lock immediately.
+  if (!(winConf >= CONFIDENCE_STOP_HIGH || (winVotes >= 2 && winConf >= 0.6))) return;
+
+  expiryLocked = true;
+  bestExpiryConf = Math.max(bestExpiryConf, winConf);
+  document.getElementById("expiry").value = winner;
   if (data.date_type) document.getElementById("date-type").value = data.date_type;
 }
 
-async function uploadScanBlob(blob) {
+async function uploadScanBlob(blob, phase) {
   const compressed = await compressBlobForUpload(blob);
   const fd = new FormData();
   fd.append("files", compressed, "frame.jpg");
-  return xhrPostMultipart("/api/scan/upload", fd);
+  const ph = phase ? String(phase) : "product";
+  return xhrPostMultipart(`/api/scan/upload?phase=${encodeURIComponent(ph)}`, fd);
 }
 
 async function flashRingSuccess() {
@@ -428,7 +455,12 @@ async function liveScanLoop(phase) {
   setLiveButtons({ scanning: true });
   setLiveRing("scanning");
   startLiveScanTicker(phase, ctrl);
-  if (phase === "expiry") bestExpiryConf = -1;
+  if (phase === "expiry") {
+    bestExpiryConf = -1;
+    expiryVotes = {};
+    expiryBestConfByDate = {};
+    expiryLocked = false;
+  }
   if (phase === "product") {
     autoFilledName = true;
     autoFilledBarcode = true;
@@ -438,7 +470,7 @@ async function liveScanLoop(phase) {
     while (Date.now() < ctrl.deadline && !ctrl.stopped) {
       let data;
       try {
-        data = await uploadScanBlob(await captureSingleFrame());
+        data = await uploadScanBlob(await captureSingleFrame(), phase);
       } catch (e) {
         const statusEl = document.getElementById("scan-status");
         stopLiveScanTicker();
@@ -514,8 +546,13 @@ async function handleProductPhaseEnd(stopped) {
     ocr_text_preview: "",
   };
   if (lastScanResult) {
-    applyFullScanToForm(lastScanResult);
-    fillScanHero(lastScanResult);
+    // If the user stopped manually, keep the current form values (they may be better than the last noisy frame).
+    if (!stopped) {
+      applyFullScanToForm(lastScanResult);
+      fillScanHero(lastScanResult);
+    } else {
+      fillScanHero(heroSnapshotFromForm(lastScanResult));
+    }
   } else {
     fillScanHero(blank);
   }
@@ -534,6 +571,15 @@ async function handleExpiryPhaseEnd(stopped) {
   document.getElementById("scan-status").textContent = stopped
     ? "Scan stopped. Choose the expiry date below, then save."
     : "Choose the expiry date on the calendar, then save.";
+  if (stopped) {
+    setLiveRing("idle");
+    const base = lastScanResult || {};
+    fillScanHero(heroSnapshotFromForm(base));
+    document.getElementById("confirm-panel").classList.remove("hidden");
+    document.getElementById("btn-continue-expiry").classList.add("hidden");
+    document.getElementById("confirm-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
   finalizeConfirmPanel();
 }
 

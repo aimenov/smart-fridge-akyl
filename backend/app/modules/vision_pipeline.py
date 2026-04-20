@@ -14,7 +14,7 @@ from backend.app.config import settings
 from backend.app.models.entities import DateType
 from backend.app.modules.barcode_decode import BarcodeCandidate, decode_barcodes_best
 from backend.app.modules.barcode_gtin import normalize_barcode_to_gtin14
-from backend.app.modules.expiry_date import detect_expiry_date
+from backend.app.modules.expiry_date import ExpiryDetection, detect_expiry_date
 logger = logging.getLogger(__name__)
 
 
@@ -165,7 +165,68 @@ def _pick_barcode_consensus(
     return (matching[0] if matching else None), debug
 
 
-def run_pipeline(image_paths: list[Path]) -> PipelineResult:
+def _pick_expiry_consensus(
+    per_frame: list[tuple[str | None, float, str | None]],
+) -> tuple[tuple[str | None, float, str | None], dict[str, Any]]:
+    """
+    Choose an expiry date only when it's stable across frames.
+
+    Input tuples: (normalized_date_iso, confidence, raw_text).
+    Rules:
+    - Multi-frame: vote by normalized ISO date; require >=2 votes and >=60% of frames-with-any-date.
+    - Single-frame: accept only if confidence >= 0.90.
+    """
+    frames_total = max(1, len(per_frame))
+    frames_with_date = [x for x in per_frame if x[0]]
+    denom = max(1, len(frames_with_date))
+    votes: dict[str, int] = {}
+    best_conf: dict[str, float] = {}
+    best_raw: dict[str, str | None] = {}
+    for iso, conf, raw in frames_with_date:
+        if not iso:
+            continue
+        votes[iso] = votes.get(iso, 0) + 1
+        if conf >= best_conf.get(iso, -1.0):
+            best_conf[iso] = conf
+            best_raw[iso] = raw
+
+    dbg: dict[str, Any] = {
+        "frames": frames_total,
+        "frames_with_date": len(frames_with_date),
+        "votes": votes,
+    }
+
+    if frames_total == 1:
+        iso, conf, raw = per_frame[0]
+        ok = bool(iso and conf >= 0.90)
+        dbg["rule"] = "single_frame_strict"
+        dbg["accepted"] = ok
+        return (iso, conf, raw) if ok else (None, 0.0, None), dbg
+
+    if not votes:
+        dbg["rule"] = "no_votes"
+        dbg["accepted"] = False
+        return (None, 0.0, None), dbg
+
+    winner, n = max(votes.items(), key=lambda kv: kv[1])
+    ratio = n / float(denom or 1)
+    ok = bool(n >= 2 and ratio >= 0.60)
+    dbg["rule"] = "vote"
+    dbg["winner"] = winner
+    dbg["winner_votes"] = n
+    dbg["winner_ratio"] = round(ratio, 3)
+    dbg["accepted"] = ok
+    if not ok:
+        return (None, 0.0, None), dbg
+    return (winner, float(best_conf.get(winner, 0.0)), best_raw.get(winner)), dbg
+
+
+def run_pipeline(
+    image_paths: list[Path],
+    *,
+    run_barcode: bool = True,
+    run_expiry: bool = True,
+) -> PipelineResult:
     t0 = time.perf_counter()
     stages: dict[str, Any] = {}
     timing_ms: dict[str, float] = {}
@@ -189,49 +250,108 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
             stages={"error": "no_images_loaded"},
         )
 
-    t_bc0 = time.perf_counter()
-    per_frame_ranked: list[list[BarcodeCandidate]] = []
-    debug_lists: list[list[dict[str, Any]]] = []
-    for im in images_bgr:
-        ranked, dbg = decode_barcodes_best(im)
-        per_frame_ranked.append(ranked)
-        debug_lists.append(dbg)
+    barcode_raw: Optional[str] = None
+    symbology: Optional[str] = None
+    normalized: Optional[str] = None
+    display_barcode: Optional[str] = None
+    if run_barcode:
+        t_bc0 = time.perf_counter()
+        per_frame_ranked: list[list[BarcodeCandidate]] = []
+        debug_lists: list[list[dict[str, Any]]] = []
+        for im in images_bgr:
+            ranked, dbg = decode_barcodes_best(im)
+            per_frame_ranked.append(ranked)
+            debug_lists.append(dbg)
 
-    all_ranked: list[BarcodeCandidate] = [c for r in per_frame_ranked for c in r]
-    all_ranked.sort(key=lambda c: (not c.valid_check_digit, -c.score))
-    qr_strings: list[str] = []
-    for im in images_bgr:
-        qr_strings.extend(_decode_qr(im))
+        all_ranked: list[BarcodeCandidate] = [c for r in per_frame_ranked for c in r]
+        all_ranked.sort(key=lambda c: (not c.valid_check_digit, -c.score))
+        qr_strings: list[str] = []
+        for im in images_bgr:
+            qr_strings.extend(_decode_qr(im))
 
-    cand_consensus, consensus_dbg = _pick_barcode_consensus(per_frame_ranked)
-    # Important: do NOT surface a "best guess" barcode when consensus rejected it.
-    # Wrong barcodes are worse than "no barcode yet" for live scanning.
-    cand, qr_fallback = (cand_consensus, None) if cand_consensus else (None, None)
-    timing_ms["barcode_qr"] = (time.perf_counter() - t_bc0) * 1000.0
+        cand_consensus, consensus_dbg = _pick_barcode_consensus(per_frame_ranked)
+        # Important: do NOT surface a "best guess" barcode when consensus rejected it.
+        # Wrong barcodes are worse than "no barcode yet" for live scanning.
+        cand, _qr_fallback = (cand_consensus, None) if cand_consensus else (None, None)
+        timing_ms["barcode_qr"] = (time.perf_counter() - t_bc0) * 1000.0
 
-    barcode_raw = cand.raw_text if cand else None
-    symbology = cand.symbology if cand else None
-    normalized = cand.normalized_gtin_14 if cand else None
+        barcode_raw = cand.raw_text if cand else None
+        symbology = cand.symbology if cand else None
+        normalized = cand.normalized_gtin_14 if cand else None
+        display_barcode = _human_barcode_for_ui(normalized, barcode_raw) if cand_consensus else None
 
-    display_barcode = _human_barcode_for_ui(normalized, barcode_raw) if cand_consensus else None
-
-    stages["barcode_candidates"] = [d for batch in debug_lists for d in batch]
-    stages["barcodes_decoded"] = [c.raw_text for c in all_ranked[:12]]
-    stages["qr_codes"] = qr_strings
-    stages["barcode_consensus"] = consensus_dbg
+        stages["barcode_candidates"] = [d for batch in debug_lists for d in batch]
+        stages["barcodes_decoded"] = [c.raw_text for c in all_ranked[:12]]
+        stages["qr_codes"] = qr_strings
+        stages["barcode_consensus"] = consensus_dbg
+    else:
+        stages["barcode_skipped"] = True
 
     # Expiry/date OCR (fast; users typically crop the printed date area).
-    t_ocr0 = time.perf_counter()
-    expiry = detect_expiry_date(images_bgr[0])
-    timing_ms["ocr_ms"] = (time.perf_counter() - t_ocr0) * 1000.0
-    stages["ocr_engine"] = "rapidocr"
-    stages["expiry"] = expiry.stages
+    expiry: ExpiryDetection | None = None
+    if run_expiry:
+        t_ocr0 = time.perf_counter()
+        if len(images_bgr) == 1:
+            # Live scan uploads one frame per request: return best single-frame parse,
+            # and let the frontend stabilize across repeated requests.
+            expiry = detect_expiry_date(images_bgr[0], fast=True)
+            stages["expiry"] = expiry.stages
+            stages["expiry_consensus"] = {
+                "rule": "single_frame",
+                "accepted": bool(expiry.normalized_date and float(expiry.confidence) >= 0.60),
+                "normalized": expiry.normalized_date,
+                "confidence": round(float(expiry.confidence), 3),
+            }
+        else:
+            per_frame_exp: list[tuple[str | None, float, str | None]] = []
+            per_frame_dbg: list[dict[str, Any]] = []
+            best_det: ExpiryDetection | None = None
+            for im in images_bgr[:3]:
+                det = detect_expiry_date(im, fast=True)
+                per_frame_exp.append((det.normalized_date, float(det.confidence), det.raw_text))
+                per_frame_dbg.append(
+                    {
+                        "normalized": det.normalized_date,
+                        "confidence": round(float(det.confidence), 3),
+                        "raw": det.raw_text,
+                    }
+                )
+                if det.normalized_date and (
+                    best_det is None or float(det.confidence) > float(best_det.confidence)
+                ):
+                    best_det = det
+
+            (iso, exp_conf, raw_txt), exp_dbg = _pick_expiry_consensus(per_frame_exp)
+            stages["expiry_consensus"] = exp_dbg
+            stages["expiry_frames"] = per_frame_dbg
+            if iso and best_det is not None:
+                # Re-run on a single frame with full preprocessing to populate richer debug stages.
+                best_det_full = detect_expiry_date(images_bgr[0], fast=False)
+                expiry = ExpiryDetection(
+                    date_type=best_det_full.date_type,
+                    raw_text=raw_txt,
+                    normalized_date=iso,
+                    confidence=float(exp_conf),
+                    stages=best_det_full.stages,
+                )
+                stages["expiry"] = expiry.stages
+            elif best_det is not None:
+                # No consensus: return best single-frame guess for debugging/tests.
+                expiry = best_det
+                stages["expiry"] = expiry.stages
+
+        timing_ms["ocr_ms"] = (time.perf_counter() - t_ocr0) * 1000.0
+        stages["ocr_engine"] = "rapidocr"
+    else:
+        timing_ms["ocr_ms"] = 0.0
+        stages["ocr_engine"] = "skipped"
+        stages["expiry_skipped"] = True
 
     # Confidence and tier: barcode and expiry are separate signals; keep it simple for now.
     conf = 0.0
     if display_barcode:
         conf = max(conf, 0.93)
-    if expiry.normalized_date:
+    if expiry and expiry.normalized_date:
         conf = max(conf, float(min(0.92, max(0.0, expiry.confidence))))
     stages["tier"] = "high" if conf >= 0.85 else ("medium" if conf >= 0.5 else "low")
 
@@ -254,12 +374,20 @@ def run_pipeline(image_paths: list[Path]) -> PipelineResult:
         barcode_raw=barcode_raw,
         barcode_symbology=symbology,
         normalized_gtin_14=normalized,
-        raw_ocr_text=" ".join(
-            [str(x.get("text", "")) for x in (expiry.stages.get("raw_hits_head") or []) if isinstance(x, dict)]
-        ).strip(),
-        date_type=expiry.date_type,
-        raw_date_text=expiry.raw_text,
-        normalized_date=expiry.normalized_date,
+        raw_ocr_text=(
+            " ".join(
+                [
+                    str(x.get("text", ""))
+                    for x in ((expiry.stages.get("raw_hits_head") if expiry else None) or [])
+                    if isinstance(x, dict)
+                ]
+            ).strip()
+            if expiry
+            else ""
+        ),
+        date_type=expiry.date_type if expiry else DateType.unknown,
+        raw_date_text=expiry.raw_text if expiry else None,
+        normalized_date=expiry.normalized_date if expiry else None,
         confidence=float(conf),
         stages=stages,
         product_name_guess=None,

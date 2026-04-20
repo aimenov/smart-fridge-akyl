@@ -17,7 +17,7 @@ from backend.app.modules import inventory_service, national_catalog, vision_pipe
 from backend.app.modules.inventory_service import CONFIDENCE_HIGH, CONFIDENCE_MEDIUM
 from backend.app.modules.vision_pipeline import PipelineResult
 from backend.app.json_safe import json_safe
-from backend.app.logging_config import get_summary_logger
+from backend.app.logging_config import get_expiry_logger, get_summary_logger
 from backend.app.observability import begin_trace, end_trace
 
 from backend.app.schemas.dto import (
@@ -29,6 +29,7 @@ from backend.app.schemas.dto import (
 
 logger = logging.getLogger(__name__)
 summary = get_summary_logger()
+exp_log = get_expiry_logger()
 
 router = APIRouter(prefix="/api", tags=["capture"])
 
@@ -69,6 +70,7 @@ def _degraded_pipeline_result(reason: str) -> PipelineResult:
 @router.post("/scan/upload", response_model=ScanUploadResponse)
 async def upload_scan(
     files: list[UploadFile] = File(...),
+    phase: str = "product",
     db: Session = Depends(get_db),
 ):
     trace_token = begin_trace(str(uuid.uuid4()))
@@ -92,7 +94,15 @@ async def upload_scan(
         # behaviour healthier and avoids starving other requests on single-worker uvicorn).
         paths = await asyncio.to_thread(vision_pipeline.persist_frames, chunks)
         try:
-            result = await asyncio.to_thread(vision_pipeline.run_pipeline, paths)
+            ph = (phase or "product").strip().lower()
+            run_barcode = ph in ("product", "both", "all")
+            run_expiry = ph in ("expiry", "both", "all", "date")
+            result = await asyncio.to_thread(
+                vision_pipeline.run_pipeline,
+                paths,
+                run_barcode=run_barcode,
+                run_expiry=run_expiry,
+            )
         except Exception:
             logger.exception("run_pipeline crashed; returning degraded scan")
             result = _degraded_pipeline_result("pipeline_exception")
@@ -106,29 +116,47 @@ async def upload_scan(
             result.confidence,
         )
 
-        master_row, catalog_name, lookup_key = national_catalog.resolve_product_for_scan(
-            db,
-            normalized_gtin_14=result.normalized_gtin_14,
-            raw_barcode=(result.barcode_raw or result.barcode or "").strip(),
-            symbology=result.barcode_symbology,
-        )
+        ph = (phase or "product").strip().lower()
+        master_row = None
+        catalog_name = None
+        lookup_key = None
+        catalog_hit = False
+        # Product lookups are expensive; skip them entirely during expiry-only scans.
+        if ph in ("product", "both", "all"):
+            master_row, catalog_name, lookup_key = national_catalog.resolve_product_for_scan(
+                db,
+                normalized_gtin_14=result.normalized_gtin_14,
+                raw_barcode=(result.barcode_raw or result.barcode or "").strip(),
+                symbology=result.barcode_symbology,
+            )
+            catalog_hit = master_row is not None
+
         product_label = catalog_name or result.product_name_guess or "Unknown product"
-        catalog_hit = master_row is not None
 
         safe_stages = json_safe(result.stages)
         if isinstance(safe_stages, dict):
             safe_stages["catalog_match"] = catalog_hit
             safe_stages["catalog_lookup_key"] = lookup_key
 
-        scan_name = catalog_name or "—"
-        summary.info(
-            "SCAN | barcode=%s | gtin14=%s | lookup_key=%s | product=%s | catalog=%s",
-            result.barcode_raw or "—",
-            result.normalized_gtin_14 or "—",
-            lookup_key or "—",
-            product_label,
-            scan_name if catalog_hit else ("miss" if lookup_key else "skip"),
-        )
+        # Console summary lines: keep them phase-specific to avoid confusion and extra noise.
+        if ph in ("product", "both", "all"):
+            scan_name = catalog_name or "—"
+            summary.info(
+                "SCAN | barcode=%s | gtin14=%s | lookup_key=%s | product=%s | catalog=%s",
+                result.barcode_raw or "—",
+                result.normalized_gtin_14 or "—",
+                lookup_key or "—",
+                product_label,
+                scan_name if catalog_hit else ("miss" if lookup_key else "skip"),
+            )
+        elif ph in ("expiry", "date"):
+            exp_log.info(
+                "EXPIRY_SCAN | date=%s | raw=%s | type=%s | conf=%.2f",
+                result.normalized_date or "—",
+                result.raw_date_text or "—",
+                result.date_type.value if result.date_type else "unknown",
+                float(result.confidence or 0.0),
+            )
 
         scan = ScanRecord(
             captured_image_paths=[str(p) for p in paths],

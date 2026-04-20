@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 _RE_NUM_DATE = re.compile(
     r"(?P<a>\d{1,4})\s*[-./]\s*(?P<b>\d{1,2})\s*[-./]\s*(?P<c>\d{1,4})"
 )
+_RE_TIME = re.compile(r"\b\d{1,2}:\d{2}\b")
 
 
 def _try_date(y: int, m: int, d: int) -> Optional[date]:
@@ -71,9 +72,21 @@ def _center_y(box: np.ndarray) -> float:
     return float(np.mean(pts[:, 1]))
 
 
-def _prep_variants(bgr: np.ndarray) -> list[tuple[str, np.ndarray]]:
+def _prep_variants(bgr: np.ndarray, *, fast: bool) -> list[tuple[str, np.ndarray]]:
     """Fast OpenCV-only preprocessing variants to help dotted-matrix print."""
     out: list[tuple[str, np.ndarray]] = []
+    # Downscale large frames for speed (mobile frames can be huge; expiry area is usually a small region anyway).
+    h0, w0 = bgr.shape[:2]
+    max_edge = max(h0, w0)
+    # Keep enough detail for dot-matrix while still bounding runtime.
+    target_edge = 1100 if fast else 1100
+    if max_edge > target_edge:
+        scale = float(target_edge) / float(max_edge)
+        bgr = cv2.resize(
+            bgr,
+            (max(2, int(w0 * scale)), max(2, int(h0 * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
 
     def add(tag: str, g: np.ndarray) -> None:
@@ -82,27 +95,37 @@ def _prep_variants(bgr: np.ndarray) -> list[tuple[str, np.ndarray]]:
     add("gray", gray)
 
     clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
-    add("clahe", clahe.apply(gray))
+    if not fast:
+        add("clahe", clahe.apply(gray))
 
     # Sharpen helps dot-matrix edges.
     blur = cv2.GaussianBlur(gray, (0, 0), sigmaX=2.0)
     sharp = cv2.addWeighted(gray, 1.6, blur, -0.6, 0)
     add("sharp", np.clip(sharp, 0, 255).astype(np.uint8))
 
-    # Adaptive threshold for low-contrast backgrounds.
-    ath = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 2)
-    add("ath", ath)
+    # One adaptive-threshold variant in fast mode can rescue low-contrast prints.
+    if fast:
+        ath = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 2
+        )
+        add("ath", ath)
 
-    # Inverted threshold sometimes works better for OCR engines.
-    add("ath_inv", 255 - ath)
+    if not fast:
+        ath = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 2
+        )
+        add("ath", ath)
+        add("ath_inv", 255 - ath)
 
-    # Upscale small crops (keeps this bounded so it's still quick).
-    scaled: list[tuple[str, np.ndarray]] = []
-    for tag, g in out:
-        h, w = g.shape[:2]
-        if max(h, w) < 900:
-            scaled.append((f"{tag}_2x", cv2.resize(g, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC)))
-    out.extend(scaled)
+        # Upscale small crops (keeps this bounded so it's still quick).
+        scaled: list[tuple[str, np.ndarray]] = []
+        for tag, g in out:
+            h, w = g.shape[:2]
+            if max(h, w) < 900:
+                scaled.append(
+                    (f"{tag}_2x", cv2.resize(g, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC))
+                )
+        out.extend(scaled)
     return out
 
 
@@ -126,7 +149,7 @@ def _get_ocr() -> RapidOCR:
     return _OCR
 
 
-def detect_expiry_date(bgr: np.ndarray) -> ExpiryDetection:
+def detect_expiry_date(bgr: np.ndarray, *, fast: bool = False) -> ExpiryDetection:
     """
     Detect a date in a user-cropped expiry area quickly.
 
@@ -134,9 +157,22 @@ def detect_expiry_date(bgr: np.ndarray) -> ExpiryDetection:
     (common label layout: produced on top, expiry/use-by below).
     """
     ocr = _get_ocr()
-    variants = _prep_variants(bgr)
+    # In fast mode, keep 2 ROIs: full + likely top-right. This stays fast but avoids missing centered prints.
+    rois: list[tuple[str, np.ndarray]] = [("full", bgr)]
+    h, w = bgr.shape[:2]
+    if fast and h >= 40 and w >= 40:
+        rois.append(("tr_70", bgr[0 : int(h * 0.75), int(w * 0.20) : w]))
+
+    variants: list[tuple[str, np.ndarray]] = []
+    for roi_tag, roi in rois:
+        for vtag, img in _prep_variants(roi, fast=fast):
+            # Fast mode: keep only a couple passes per ROI.
+            if fast and vtag not in ("gray", "sharp", "ath"):
+                continue
+            variants.append((f"{roi_tag}_{vtag}", img))
     year_now = date.today().year
 
+    today = date.today()
     candidates: list[dict[str, Any]] = []
     raw_hits: list[dict[str, Any]] = []
 
@@ -165,6 +201,20 @@ def detect_expiry_date(bgr: np.ndarray) -> ExpiryDetection:
             t = text.strip()
             if len(t) < 4:
                 continue
+            # Normalize common OCR confusions for date parsing.
+            t_norm = (
+                t.replace("O", "0")
+                .replace("o", "0")
+                .replace("I", "1")
+                .replace("l", "1")
+                .replace("Z", "2")
+                .replace("S", "5")
+                .replace("G", "6")
+                .replace("B", "8")
+            )
+            # OCR sometimes uses ':' as a separator between date components; treat it like '.'
+            # for date parsing (but keep real HH:MM time detection separate).
+            t_parse = t_norm.replace(":", ".")
             try:
                 sc = float(score)
             except Exception:
@@ -174,8 +224,8 @@ def detect_expiry_date(bgr: np.ndarray) -> ExpiryDetection:
             raw_hits.append({"tag": tag, "text": t, "score": round(sc, 3), "y": round(y, 1)})
 
             # Extract dates from the text token(s).
-            has_time = ":" in t
-            for m in _RE_NUM_DATE.finditer(t):
+            has_time = bool(_RE_TIME.search(t_norm))
+            for m in _RE_NUM_DATE.finditer(t_parse):
                 token = m.group(0)
                 dt = _parse_numeric_date(token)
                 if not dt:
@@ -184,24 +234,71 @@ def detect_expiry_date(bgr: np.ndarray) -> ExpiryDetection:
                 year_bias = 18.0 if dt.year >= year_now else -28.0
                 # Dotted-matrix often misreads the year; for expiry scans, past years are almost always wrong.
                 time_penalty = -22.0 if has_time else 0.0
+                # Prefer later dates (expiry is usually after manufacturing).
+                # Keep this bounded so crazy far-future dates don't dominate.
+                delta_days = (dt - today).days
+                delta_days = max(-3650, min(3650, int(delta_days)))
+                future_bias = (delta_days / 3650.0) * 22.0
                 cand_score = (
                     sc * 100.0
                     + (y / max(1.0, float(bgr.shape[0]))) * 60.0
                     + year_bias
                     + time_penalty
+                    + future_bias
                 )
                 candidates.append(
                     {
                         "tag": tag,
                         "raw": token,
                         "iso": dt.isoformat(),
+                        "dt": dt,
                         "ocr_score": sc,
                         "y": y,
                         "score": cand_score,
+                        "has_time": has_time,
                     }
                 )
 
-    best = max(candidates, key=lambda c: c["score"]) if candidates else None
+    # Post-process: if we saw a manufacturing date with time, and another date with same day/month but a lower year,
+    # bump that date's year up to the manufacturing year (common dotted-matrix OCR year slip: 26 -> 25).
+    manuf_year = None
+    for c in candidates:
+        if c.get("has_time") and isinstance(c.get("dt"), date):
+            y = c["dt"].year
+            manuf_year = y if manuf_year is None else max(manuf_year, y)
+
+    if manuf_year is not None:
+        for c in candidates:
+            dt = c.get("dt")
+            if not isinstance(dt, date) or c.get("has_time"):
+                continue
+            if dt.year < manuf_year and (manuf_year - dt.year) <= 1:
+                bumped = _try_date(manuf_year, dt.month, dt.day)
+                if bumped:
+                    c["dt"] = bumped
+                    c["iso"] = bumped.isoformat()
+                    # Reward the bump slightly so it wins over the manufacturing date.
+                    c["score"] = float(c["score"]) + 14.0
+    else:
+        # If we did not see a manufacturing year, but the parsed year is just one behind "now",
+        # bump it forward (common OCR slip for dotted-matrix years).
+        for c in candidates:
+            dt = c.get("dt")
+            if not isinstance(dt, date) or c.get("has_time"):
+                continue
+            if dt.year < year_now and (year_now - dt.year) <= 1:
+                bumped = _try_date(year_now, dt.month, dt.day)
+                if bumped:
+                    c["dt"] = bumped
+                    c["iso"] = bumped.isoformat()
+                    c["score"] = float(c["score"]) + 10.0
+
+    # Prefer non-time (expiry) dates; if still tied, take highest score.
+    best = max(
+        candidates,
+        # Prefer non-time (expiry) over time-stamped (manufacturing) lines.
+        key=lambda c: ((not bool(c.get("has_time", False))), float(c["score"])),
+    ) if candidates else None
     stages = {
         "variants_tried": len(variants),
         "raw_hits_head": raw_hits[:24],
@@ -209,6 +306,7 @@ def detect_expiry_date(bgr: np.ndarray) -> ExpiryDetection:
     }
 
     if not best:
+        logger.debug("expiry: miss | candidates=0")
         return ExpiryDetection(
             date_type=DateType.unknown,
             raw_text=None,
@@ -219,6 +317,13 @@ def detect_expiry_date(bgr: np.ndarray) -> ExpiryDetection:
 
     # Confidence: map OCR score (0..1) into something usable, and bump slightly because crop is targeted.
     conf = float(min(0.98, max(0.0, best["ocr_score"] * 0.95 + 0.15)))
+    logger.debug(
+        "expiry: best=%s raw=%s conf=%.2f candidates=%d",
+        best["iso"],
+        best["raw"],
+        conf,
+        len(candidates),
+    )
     return ExpiryDetection(
         date_type=DateType.expiry,
         raw_text=str(best["raw"]),

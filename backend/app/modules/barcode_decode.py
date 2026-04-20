@@ -266,6 +266,34 @@ def decode_barcodes_best(bgr: np.ndarray) -> tuple[list[BarcodeCandidate], list[
     ingest(_decode_with_type_on_image(bgr, preprocess="native"))
     ingest(_decode_from_detected_quads(bgr, preprocess="native"))
 
+    # Fast-path: if we already have a strong, checksum-valid candidate from the raw image/warp,
+    # skip the more expensive multi-variant passes (helps live scanning latency).
+    strong = [
+        c
+        for c in all_candidates.values()
+        if c.valid_check_digit and c.normalized_gtin_14 and c.score >= 155.0
+    ]
+    if strong:
+        ranked = sorted(
+            all_candidates.values(),
+            key=lambda x: (not x.valid_check_digit, -x.score),
+        )
+        debug = [
+            {
+                "raw": c.raw_text,
+                "symbology": c.symbology,
+                "gtin14": c.normalized_gtin_14,
+                "check_ok": c.valid_check_digit,
+                "score": round(c.score, 3),
+                "preprocess": c.preprocess,
+            }
+            for c in ranked
+        ]
+        logger.debug(
+            "barcode decode fast-path: %s distinct raw strings", len(ranked)
+        )
+        return ranked, debug
+
     gray0 = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     ath0 = cv2.adaptiveThreshold(gray0, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 2)
     ath_bgr = cv2.cvtColor(ath0, cv2.COLOR_GRAY2BGR)
