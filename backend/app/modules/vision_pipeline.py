@@ -12,10 +12,16 @@ import numpy as np
 
 from backend.app.config import settings
 from backend.app.models.entities import DateType
-from backend.app.modules.barcode_decode import BarcodeCandidate, decode_barcodes_best
+from backend.app.modules.barcode_decode import (
+    BarcodeCandidate,
+    barcode_candidate_rank_key,
+    decode_barcodes_best,
+)
+from backend.app.logging_config import get_recognition_logger
 from backend.app.modules.barcode_gtin import normalize_barcode_to_gtin14
 from backend.app.modules.expiry_date import ExpiryDetection, detect_expiry_date
 logger = logging.getLogger(__name__)
+recognition_log = get_recognition_logger()
 
 
 def _load_image_bgr(path: Path) -> Optional[np.ndarray]:
@@ -85,6 +91,21 @@ def _human_barcode_for_ui(normalized_gtin14: str | None, raw_barcode: str | None
     return None
 
 
+def _votes_by_gtin14(
+    best_per_frame: list[BarcodeCandidate], *, retail_only: bool
+) -> dict[str, int]:
+    votes: dict[str, int] = {}
+    for c in best_per_frame:
+        if not (c.valid_check_digit and c.normalized_gtin_14):
+            continue
+        sym = (c.symbology or "").upper().replace("-", "_")
+        if retail_only and sym == "EAN_8":
+            continue
+        k = c.normalized_gtin_14
+        votes[k] = votes.get(k, 0) + 1
+    return votes
+
+
 def _pick_barcode_consensus(
     per_frame_ranked: list[list[BarcodeCandidate]],
 ) -> tuple[Optional[BarcodeCandidate], dict[str, Any]]:
@@ -93,23 +114,26 @@ def _pick_barcode_consensus(
 
     Strategy:
     - For each frame, take its best candidate (already ranked by decoder rules).
-    - Vote by checksum-valid ``normalized_gtin_14`` only (avoids locking onto partial/false reads).
+    - Vote by checksum-valid ``normalized_gtin_14``. Prefer EAN-13/UPC reads first:
+      accidental EAN-8 patches are ignored until no retail-length votes remain.
     - Require either:
-      - >=2 matching votes and >=60% of frames, OR
-      - single-frame case: valid checksum and strong score.
+      - >=2 matching votes and >=60% of frames-with-any-candidate, OR
+      - single-frame case: valid checksum and score >= 155 (blocks ~140 false EAN-8 patches).
     """
     frames_total = max(1, len(per_frame_ranked))
     best_per_frame: list[BarcodeCandidate] = [r[0] for r in per_frame_ranked if r]
     frames_with_any_candidate = max(1, len(best_per_frame))
 
-    votes: dict[str, int] = {}
-    for c in best_per_frame:
-        if c.valid_check_digit and c.normalized_gtin_14:
-            votes[c.normalized_gtin_14] = votes.get(c.normalized_gtin_14, 0) + 1
+    votes = _votes_by_gtin14(best_per_frame, retail_only=True)
+    vote_mode = "retail_first"
+    if not votes:
+        votes = _votes_by_gtin14(best_per_frame, retail_only=False)
+        vote_mode = "all_symbologies"
 
     debug: dict[str, Any] = {
         "frames": frames_total,
         "frames_with_any_candidate": len(best_per_frame),
+        "vote_mode": vote_mode,
         "best_per_frame": [
             {
                 "raw": c.raw_text,
@@ -130,8 +154,10 @@ def _pick_barcode_consensus(
     # If we only have one frame, accept only high-quality checksum-valid reads.
     if len(best_per_frame) == 1:
         c = best_per_frame[0]
-        ok = bool(c.valid_check_digit and c.normalized_gtin_14 and c.score >= 120.0)
+        # Require a strong read: marginal false EAN-8 patches often sit ~140–150.
+        ok = bool(c.valid_check_digit and c.normalized_gtin_14 and float(c.score) >= 155.0)
         debug["consensus_rule"] = "single_frame_strict"
+        debug["vote_mode"] = vote_mode
         debug["accepted"] = ok
         return (c if ok else None), debug
 
@@ -161,7 +187,7 @@ def _pick_barcode_consensus(
         for c in best_per_frame
         if c.normalized_gtin_14 == winner_gtin14 and c.valid_check_digit
     ]
-    matching.sort(key=lambda c: -c.score)
+    matching.sort(key=barcode_candidate_rank_key)
     return (matching[0] if matching else None), debug
 
 
@@ -264,7 +290,7 @@ def run_pipeline(
             debug_lists.append(dbg)
 
         all_ranked: list[BarcodeCandidate] = [c for r in per_frame_ranked for c in r]
-        all_ranked.sort(key=lambda c: (not c.valid_check_digit, -c.score))
+        all_ranked.sort(key=barcode_candidate_rank_key)
         qr_strings: list[str] = []
         for im in images_bgr:
             qr_strings.extend(_decode_qr(im))
@@ -284,6 +310,15 @@ def run_pipeline(
         stages["barcodes_decoded"] = [c.raw_text for c in all_ranked[:12]]
         stages["qr_codes"] = qr_strings
         stages["barcode_consensus"] = consensus_dbg
+        recognition_log.info(
+            "BARCODE | frames=%d | ok=%s | rule=%s | vote_mode=%s | gtin14=%s | ms=%.1f",
+            len(per_frame_ranked),
+            bool(consensus_dbg.get("accepted")),
+            consensus_dbg.get("consensus_rule"),
+            consensus_dbg.get("vote_mode"),
+            normalized or "-",
+            timing_ms["barcode_qr"],
+        )
     else:
         stages["barcode_skipped"] = True
 
@@ -303,10 +338,13 @@ def run_pipeline(
                 "confidence": round(float(expiry.confidence), 3),
             }
         else:
+            # Batch uploads (e.g. extracted video frames): OCR only a few frames for latency.
+            # Prefer the **last** frames when several are provided — clips often start blurry.
+            batch_imgs = images_bgr[-3:] if len(images_bgr) >= 3 else images_bgr
             per_frame_exp: list[tuple[str | None, float, str | None]] = []
             per_frame_dbg: list[dict[str, Any]] = []
             best_det: ExpiryDetection | None = None
-            for im in images_bgr[:3]:
+            for im in batch_imgs:
                 det = detect_expiry_date(im, fast=True)
                 per_frame_exp.append((det.normalized_date, float(det.confidence), det.raw_text))
                 per_frame_dbg.append(
@@ -325,8 +363,8 @@ def run_pipeline(
             stages["expiry_consensus"] = exp_dbg
             stages["expiry_frames"] = per_frame_dbg
             if iso and best_det is not None:
-                # Re-run on a single frame with full preprocessing to populate richer debug stages.
-                best_det_full = detect_expiry_date(images_bgr[0], fast=False)
+                # Re-run on a representative frame with full preprocessing to populate richer debug stages.
+                best_det_full = detect_expiry_date(batch_imgs[-1], fast=False)
                 expiry = ExpiryDetection(
                     date_type=best_det_full.date_type,
                     raw_text=raw_txt,
@@ -342,6 +380,15 @@ def run_pipeline(
 
         timing_ms["ocr_ms"] = (time.perf_counter() - t_ocr0) * 1000.0
         stages["ocr_engine"] = "rapidocr"
+        ec = stages.get("expiry_consensus") or {}
+        recognition_log.info(
+            "EXPIRY_OCR | frames=%d | rule=%s | accepted=%s | date=%s | ms=%.1f",
+            len(images_bgr),
+            ec.get("rule"),
+            ec.get("accepted"),
+            (expiry.normalized_date if expiry else None) or "-",
+            timing_ms["ocr_ms"],
+        )
     else:
         timing_ms["ocr_ms"] = 0.0
         stages["ocr_engine"] = "skipped"

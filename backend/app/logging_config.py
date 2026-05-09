@@ -11,6 +11,7 @@ from backend.app.config import settings
 
 SUMMARY_LOGGER_NAME = "smart_fridge.summary"
 EXPIRY_LOGGER_NAME = "smart_fridge.expiry"
+RECOGNITION_LOGGER_NAME = "smart_fridge.recognition"
 
 
 def get_summary_logger() -> logging.Logger:
@@ -22,11 +23,17 @@ def get_expiry_logger() -> logging.Logger:
     return logging.getLogger(EXPIRY_LOGGER_NAME)
 
 
+def get_recognition_logger() -> logging.Logger:
+    """Barcode/OCR pipeline milestones (decode path, consensus); console + file."""
+    return logging.getLogger(RECOGNITION_LOGGER_NAME)
+
+
 def setup_logging(level: str = "INFO", *, json_logs: bool = False) -> None:
     """
     - **File** (see ``settings.log_file``): full timestamps and logger names (trace-style detail stays here).
     - **Console**: WARNING and above only — avoids trace-id noise.
     - **Summary** logger: INFO, plain ``%(message)s`` on stderr + same lines in the log file.
+    - **Recognition** logger (``smart_fridge.recognition``): INFO barcode/expiry pipeline milestones on stderr + file.
     """
     lvl = getattr(logging, level.upper(), logging.INFO)
     console_lvl = getattr(
@@ -100,3 +107,14 @@ def setup_logging(level: str = "INFO", *, json_logs: bool = False) -> None:
     exp_brief.setFormatter(logging.Formatter("%(message)s"))
     exp_log.addHandler(exp_brief)
     exp_log.addHandler(file_handler)
+
+    rec_log = logging.getLogger(RECOGNITION_LOGGER_NAME)
+    for h in rec_log.handlers[:]:
+        rec_log.removeHandler(h)
+    rec_log.setLevel(logging.INFO)
+    rec_log.propagate = False
+    rec_brief = logging.StreamHandler(sys.stderr)
+    rec_brief.setLevel(logging.INFO)
+    rec_brief.setFormatter(logging.Formatter("%(message)s"))
+    rec_log.addHandler(rec_brief)
+    rec_log.addHandler(file_handler)

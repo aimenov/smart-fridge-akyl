@@ -54,7 +54,7 @@ body {
 
 #page-root {
   padding: 1rem;
-  max-width: 720px;
+  max-width: min(960px, 100%);
   margin: 0 auto 3rem;
 }
 
@@ -288,4 +288,206 @@ select {
   font-size: 0.95rem;
   font-weight: 600;
   color: #475569;
+}
+
+/* --- Inventory / fridge view --- */
+.inventory-panel {
+  overflow: hidden;
+}
+
+.inventory-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.inventory-title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.inventory-sub {
+  margin: 0.35rem 0 0;
+  font-size: 0.9rem;
+}
+
+.inventory-stats {
+  margin-bottom: 1rem;
+}
+
+.inventory-stats-inner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.inventory-empty-hint {
+  margin: 0;
+}
+
+.stat-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  padding: 0.45rem 0.75rem;
+  border-radius: 999px;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  font-size: 0.88rem;
+}
+
+.stat-pill-value {
+  font-weight: 800;
+  font-size: 1.05rem;
+  color: #0f172a;
+}
+
+.stat-pill-label {
+  color: #64748b;
+  font-weight: 600;
+}
+
+.stat-pill--warn {
+  background: #fffbeb;
+  border-color: #fcd34d;
+}
+
+.stat-pill--warn .stat-pill-value {
+  color: #92400e;
+}
+
+.stat-pill--bad {
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+
+.stat-pill--bad .stat-pill-value {
+  color: #991b1b;
+}
+
+.inventory-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
+  gap: 1rem;
+}
+
+.fridge-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  padding: 1rem;
+  background: linear-gradient(165deg, #ffffff 0%, #f8fafc 100%);
+  box-shadow: 0 4px 18px rgba(15, 23, 42, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.fridge-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.fridge-card-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1.3;
+  color: #0f172a;
+}
+
+.item-status-pill {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.28rem 0.55rem;
+  border-radius: 999px;
+}
+
+.item-status-pill--fresh {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.item-status-pill--expiring {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.item-status-pill--expired {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.item-status-pill--neutral {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.fridge-card-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.fridge-chip {
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.28rem 0.55rem;
+  border-radius: 8px;
+  background: #ecfeff;
+  color: #0e7490;
+  border: 1px solid #a5f3fc;
+}
+
+.fridge-chip--qty {
+  background: #f0fdf4;
+  color: #166534;
+  border-color: #bbf7d0;
+}
+
+.fridge-card-expiry {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 12px;
+  background: rgba(15, 118, 110, 0.06);
+  border: 1px solid rgba(15, 118, 110, 0.15);
+}
+
+.expiry-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #0f766e;
+}
+
+.expiry-value {
+  font-size: 1rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #0f172a;
+}
+
+.fridge-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: auto;
+  padding-top: 0.25rem;
+}
+
+.fridge-card-actions button.secondary {
+  padding: 0.45rem 0.65rem;
+  font-size: 0.82rem;
 }

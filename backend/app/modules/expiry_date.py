@@ -21,6 +21,78 @@ _RE_NUM_DATE = re.compile(
 _RE_TIME = re.compile(r"\b\d{1,2}:\d{2}\b")
 
 
+def _normalize_unicode_separators(s: str) -> str:
+    """Map unicode slashes/dashes (common in OCR) to ASCII separators for regex/parsing."""
+    out = s
+    for ch in (
+        "\uff0f",
+        "\uff3c",
+        "\u2215",
+        "\u2044",
+        "\ufe63",
+        "\u2013",
+        "\u2014",
+        "\u2212",
+    ):
+        out = out.replace(ch, ".")
+    return out
+
+
+def _expiry_date_token_variants(token: str) -> list[tuple[str, float]]:
+    """
+    OCR repairs for dotted-matrix DD.MM.YY style expiry lines.
+
+    Returns ``(variant_text, score_bonus)`` — bonus nudges ambiguous parses toward real expiry crops.
+
+    - Ghost leading ``1`` on ``03`` for Jan/Feb (``13.01`` / ``13.02`` → ``03.01`` / ``03.02``).
+    - Day ``11``–``19`` → subtract 10 (``13`` misread for ``03`` on dot-matrix).
+    - Two-digit year neighbours: **YY+1** is boosted when the printed year ends in ``25``/``26``
+      (common under-read before ``27``); **YY−1** is boosted when it ends in ``28``/``29`` (over-read).
+      Other year shifts are strongly penalized so ``03.02.28`` does not beat a literal ``03.02.27``.
+    """
+    t = token.strip().replace("-", ".").replace("/", ".").strip()
+    bonuses: dict[str, float] = {}
+
+    def add(x: str, bonus: float = 0.0) -> None:
+        if not x:
+            return
+        bonuses[x] = max(bonuses.get(x, float("-inf")), bonus)
+
+    add(t, 0.0)
+    # Ghost leading ``1`` on ``03`` for Jan/Feb.
+    if re.match(r"^13\.0[12]\.", t):
+        add("03" + t[2:], 22.0)
+
+    mday = re.match(r"^(\d{2})\.(\d{1,2})\.(\d{2})$", t)
+    if mday:
+        d_s, mo, yy_s = mday.groups()
+        d_i = int(d_s)
+        if 11 <= d_i <= 19:
+            add(f"{d_i - 10:02d}.{mo}.{yy_s}", 28.0)
+
+    # YY±1 on every DD.MM.YY token we already derived — needed after day-correction
+    # ``03.02.26`` → ``03.02.27`` (year digit slips); original OCR ``13.02-26`` never sees YY±1 on ``03.*`` otherwise.
+    #
+    # Do **not** use one penalty for all shifts: ``03.02.27`` + YY+1 → ``03.02.28`` must lose to the literal read
+    # (future_bias slightly favors later dates). Real slips are usually ``…25/26`` read low → true ``…27``.
+    # Conversely ``…28/29`` may be OCR high → true ``…27``.
+    shift_penalty = 22.0
+    snap = list(bonuses.keys())
+    for key in snap:
+        m_yy = re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{2})$", key)
+        if not m_yy:
+            continue
+        d, mo, yy_s = m_yy.groups()
+        yv = int(yy_s)
+        base_b = bonuses[key]
+        bonus_next = base_b + (14.0 if yv in (25, 26) else -shift_penalty)
+        bonus_prev = base_b + (14.0 if yv in (28, 29) else -shift_penalty)
+        add(f"{d}.{mo}.{(yv + 1) % 100:02d}", bonus_next)
+        add(f"{d}.{mo}.{(yv - 1) % 100:02d}", bonus_prev)
+    # Stable order for debugging.
+    return sorted(bonuses.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
 def _try_date(y: int, m: int, d: int) -> Optional[date]:
     try:
         return date(int(y), int(m), int(d))
@@ -189,7 +261,7 @@ def detect_expiry_date(bgr: np.ndarray, *, fast: bool = False) -> ExpiryDetectio
             )
             # OCR sometimes uses ':' as a separator between date components; treat it like '.'
             # for date parsing (but keep real HH:MM time detection separate).
-            t_parse = t_norm.replace(":", ".")
+            t_parse = _normalize_unicode_separators(t_norm.replace(":", "."))
             try:
                 sc = float(score)
             except Exception:
@@ -202,37 +274,39 @@ def detect_expiry_date(bgr: np.ndarray, *, fast: bool = False) -> ExpiryDetectio
             has_time = bool(_RE_TIME.search(t_norm))
             for m in _RE_NUM_DATE.finditer(t_parse):
                 token = m.group(0)
-                dt = _parse_numeric_date(token)
-                if not dt:
-                    continue
-                # Prefer lower y and higher OCR confidence.
-                year_bias = 18.0 if dt.year >= year_now else -28.0
-                # Dotted-matrix often misreads the year; for expiry scans, past years are almost always wrong.
-                time_penalty = -22.0 if has_time else 0.0
-                # Prefer later dates (expiry is usually after manufacturing).
-                # Keep this bounded so crazy far-future dates don't dominate.
-                delta_days = (dt - today).days
-                delta_days = max(-3650, min(3650, int(delta_days)))
-                future_bias = (delta_days / 3650.0) * 22.0
-                cand_score = (
-                    sc * 100.0
-                    + (y / max(1.0, float(img_h))) * 60.0
-                    + year_bias
-                    + time_penalty
-                    + future_bias
-                )
-                local_cands.append(
-                    {
-                        "tag": tag,
-                        "raw": token,
-                        "iso": dt.isoformat(),
-                        "dt": dt,
-                        "ocr_score": sc,
-                        "y": y,
-                        "score": cand_score,
-                        "has_time": has_time,
-                    }
-                )
+                for vt, vbonus in _expiry_date_token_variants(token):
+                    dt = _parse_numeric_date(vt)
+                    if not dt:
+                        continue
+                    # Prefer lower y and higher OCR confidence.
+                    year_bias = 18.0 if dt.year >= year_now else -28.0
+                    # Dotted-matrix often misreads the year; for expiry scans, past years are almost always wrong.
+                    time_penalty = -22.0 if has_time else 0.0
+                    # Prefer later dates (expiry is usually after manufacturing).
+                    # Keep this bounded so crazy far-future dates don't dominate.
+                    delta_days = (dt - today).days
+                    delta_days = max(-3650, min(3650, int(delta_days)))
+                    future_bias = (delta_days / 3650.0) * 22.0
+                    cand_score = (
+                        sc * 100.0
+                        + (y / max(1.0, float(img_h))) * 60.0
+                        + year_bias
+                        + time_penalty
+                        + future_bias
+                        + vbonus
+                    )
+                    local_cands.append(
+                        {
+                            "tag": tag,
+                            "raw": vt,
+                            "iso": dt.isoformat(),
+                            "dt": dt,
+                            "ocr_score": sc,
+                            "y": y,
+                            "score": cand_score,
+                            "has_time": has_time,
+                        }
+                    )
         return local_cands, local_hits
 
     def run_ocr_one(tag: str, g: np.ndarray) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -270,30 +344,30 @@ def detect_expiry_date(bgr: np.ndarray, *, fast: bool = False) -> ExpiryDetectio
                 cands, hits = run_ocr_one(tag, img)
                 raw_hits.extend(hits)
                 candidates.extend(cands)
-                # Short-circuit: any non-time future-ish date with decent OCR score.
-                for c in cands:
-                    dt = c.get("dt")
-                    if not isinstance(dt, date):
-                        continue
-                    if c.get("has_time"):
-                        continue
-                    if dt < today:
-                        continue
-                    if float(c.get("ocr_score") or 0.0) >= 0.75:
-                        # Keep stages small in fast mode.
-                        stages = {
-                            "variants_tried": 1,
-                            "raw_hits_head": raw_hits[:24],
-                            "candidates": [c],
-                        }
-                        conf = float(min(0.98, max(0.0, float(c["ocr_score"]) * 0.95 + 0.15)))
-                        return ExpiryDetection(
-                            date_type=DateType.expiry,
-                            raw_text=str(c["raw"]),
-                            normalized_date=str(c["iso"]),
-                            confidence=conf,
-                            stages=stages,
-                        )
+                # Short-circuit: strongest eligible parse (variants may add multiple dates per line).
+                eligible_sc = [
+                    c
+                    for c in cands
+                    if isinstance(c.get("dt"), date)
+                    and not c.get("has_time")
+                    and c["dt"] >= today
+                    and float(c.get("ocr_score") or 0.0) >= 0.75
+                ]
+                if eligible_sc:
+                    best_sc = max(eligible_sc, key=lambda c: float(c["score"]))
+                    stages = {
+                        "variants_tried": 1,
+                        "raw_hits_head": raw_hits[:24],
+                        "candidates": [best_sc],
+                    }
+                    conf = float(min(0.98, max(0.0, float(best_sc["ocr_score"]) * 0.95 + 0.15)))
+                    return ExpiryDetection(
+                        date_type=DateType.expiry,
+                        raw_text=str(best_sc["raw"]),
+                        normalized_date=str(best_sc["iso"]),
+                        confidence=conf,
+                        stages=stages,
+                    )
             # If we saw any non-time candidates in this ROI, don't expand work further.
             if any((not x.get("has_time")) for x in candidates):
                 break

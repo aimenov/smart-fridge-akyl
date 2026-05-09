@@ -754,7 +754,7 @@ async function beginFullScanFlow() {
   }
 }
 
-function resetScanSessionAfterSave() {
+function resetScanSessionAfterSave(saved) {
   lockProductFields = false;
   fullFlowAwaitingExpiry = false;
   liveScanControl = null;
@@ -771,7 +771,11 @@ function resetScanSessionAfterSave() {
   document.getElementById("date-type").value = "";
   document.getElementById("qty").value = "1";
   document.getElementById("unit").value = "each";
-  document.getElementById("scan-status").textContent = "Saved. Tap Start scanning to add another item.";
+  const label =
+    saved && saved.canonical_name
+      ? `Saved “${saved.canonical_name}”. Tap Start scanning to add another.`
+      : "Saved. Tap Start scanning to add another.";
+  document.getElementById("scan-status").textContent = label;
   setPrimaryScanButtonIdle();
 }
 
@@ -941,33 +945,101 @@ async function confirmScan() {
     location: document.getElementById("location").value || "fridge",
     inferred_date_type: document.getElementById("date-type").value || null,
   };
-  await api("/api/scan/confirm", {
+  const saved = await api("/api/scan/confirm", {
     method: "POST",
     body: JSON.stringify(body),
   });
-  resetScanSessionAfterSave();
+  resetScanSessionAfterSave(saved);
+}
+
+function sortInventoryForDisplay(list) {
+  const rank = (s) =>
+    ({ expired: 0, expiring: 1, fresh: 2, consumed: 9, discarded: 9 }[s] ?? 5);
+  return [...list].sort((a, b) => {
+    const rs = rank(a.status) - rank(b.status);
+    if (rs !== 0) return rs;
+    if (!a.expiry_date && !b.expiry_date) return a.canonical_name.localeCompare(b.canonical_name);
+    if (!a.expiry_date) return 1;
+    if (!b.expiry_date) return -1;
+    return a.expiry_date.localeCompare(b.expiry_date);
+  });
+}
+
+function formatExpiryShort(iso) {
+  if (!iso) return "No date set";
+  try {
+    const d = new Date(`${iso}T12:00:00`);
+    return d.toLocaleDateString(undefined, {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+  } catch {
+    return iso;
+  }
 }
 
 async function loadInventory() {
-  const list = await api("/api/items");
+  const listRaw = await api("/api/items");
+  const list = sortInventoryForDisplay(listRaw);
   const root = document.getElementById("inventory-list");
+  const statsEl = document.getElementById("inventory-stats");
+  if (!root) return;
+
+  const n = list.length;
+  const expiring = list.filter((x) => x.status === "expiring").length;
+  const expired = list.filter((x) => x.status === "expired").length;
+  if (statsEl) {
+    statsEl.innerHTML = !n
+      ? `<p class="muted inventory-empty-hint">Scan something on the <strong>Scan</strong> tab to fill the fridge.</p>`
+      : `<div class="inventory-stats-inner">
+          <div class="stat-pill" title="Active rows in inventory"><span class="stat-pill-value">${n}</span><span class="stat-pill-label">items</span></div>
+          ${expiring ? `<div class="stat-pill stat-pill--warn"><span class="stat-pill-value">${expiring}</span><span class="stat-pill-label">expiring soon</span></div>` : ""}
+          ${expired ? `<div class="stat-pill stat-pill--bad"><span class="stat-pill-value">${expired}</span><span class="stat-pill-label">past date</span></div>` : ""}
+        </div>`;
+  }
+
   root.innerHTML = "";
   if (!list.length) {
-    root.innerHTML = `<p class="muted">No active items.</p>`;
+    root.innerHTML = `<p class="muted">Nothing here yet — add items from the Scan tab.</p>`;
     return;
   }
+
   for (const it of list) {
+    const statusClass =
+      it.status === "expired"
+        ? "item-status-pill--expired"
+        : it.status === "expiring"
+          ? "item-status-pill--expiring"
+          : it.status === "fresh"
+            ? "item-status-pill--fresh"
+            : "item-status-pill--neutral";
+
+    const locLabel =
+      it.location === "freezer" ? "Freezer" : it.location === "pantry" ? "Pantry" : "Fridge";
+
     const card = el(`
-      <div class="card" data-id="${it.id}">
-        <strong>${escapeHtml(it.canonical_name)}</strong>
-        <div class="muted">${it.quantity} ${it.unit} · ${it.status} · ${it.location}</div>
-        <div class="muted">Expiry: ${it.expiry_date || "—"}</div>
-        <div class="row" style="margin-top:.5rem;">
-          <button class="secondary" data-act="consume">Consumed</button>
-          <button class="secondary" data-act="discard">Discard</button>
-          <button class="secondary" data-act="opened">Mark opened</button>
+      <article class="fridge-card" data-id="${it.id}">
+        <div class="fridge-card-top">
+          <h3 class="fridge-card-title">${escapeHtml(it.canonical_name)}</h3>
+          <span class="item-status-pill ${statusClass}">${escapeHtml(it.status)}</span>
         </div>
-      </div>`);
+        <div class="fridge-card-chips">
+          <span class="fridge-chip" title="Storage">${locLabel}</span>
+          <span class="fridge-chip fridge-chip--qty">${escapeHtml(String(it.quantity))} ${escapeHtml(it.unit)}</span>
+        </div>
+        <div class="fridge-card-expiry">
+          <span class="expiry-label">Expiry</span>
+          <time class="expiry-value" datetime="${escapeHtml(it.expiry_date || "")}">${escapeHtml(formatExpiryShort(it.expiry_date))}</time>
+        </div>
+        <div class="fridge-card-actions">
+          <button type="button" class="secondary" data-act="consume">Consumed</button>
+          <button type="button" class="secondary" data-act="discard">Discard</button>
+          <button type="button" class="secondary" data-act="opened">Mark opened</button>
+        </div>
+      </article>`);
+
     card.querySelectorAll("button").forEach((btn) => {
       btn.onclick = async () => {
         const act = btn.getAttribute("data-act");
@@ -1144,7 +1216,20 @@ function renderPage() {
     document.getElementById("btn-confirm").onclick = () =>
       confirmScan().catch((e) => alert(e.message));
   } else if (activeId === "inventory") {
-    pr.innerHTML = `<section class="panel"><h2>Inventory</h2><div id="inventory-list" class="list"></div></section>`;
+    pr.innerHTML = `
+      <section class="panel inventory-panel">
+        <div class="inventory-toolbar">
+          <div>
+            <h2 class="inventory-title">What's in the fridge</h2>
+            <p class="muted inventory-sub">Soonest expiry first — tap Refresh after saving from Scan.</p>
+          </div>
+          <button type="button" class="secondary" id="btn-inv-refresh">Refresh</button>
+        </div>
+        <div id="inventory-stats" class="inventory-stats" aria-live="polite"></div>
+        <div id="inventory-list" class="inventory-grid"></div>
+      </section>`;
+    document.getElementById("btn-inv-refresh").onclick = () =>
+      loadInventory().catch((e) => alert(e.message));
     loadInventory().catch((e) => (document.getElementById("inventory-list").textContent = e.message));
   } else if (activeId === "expiring") {
     pr.innerHTML = `<section class="panel"><h2>Expiring soon</h2><div id="expiring-list" class="list"></div></section>`;

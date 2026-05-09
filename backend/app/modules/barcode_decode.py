@@ -247,7 +247,19 @@ def _preprocessed_bgr_variants(bgr: np.ndarray) -> list[tuple[str, np.ndarray]]:
 def _prefer_candidate(new: BarcodeCandidate, old: BarcodeCandidate) -> bool:
     if new.valid_check_digit != old.valid_check_digit:
         return new.valid_check_digit
-    return new.score > old.score
+    new_k = barcode_candidate_rank_key(new)
+    old_k = barcode_candidate_rank_key(old)
+    return new_k < old_k
+
+
+def barcode_candidate_rank_key(c: BarcodeCandidate) -> tuple[bool, float, float]:
+    """
+    Sort key (ascending = better): valid checksum first, higher score, preferred retail symbology.
+    Breaks ties where OpenCV returns an accidental EAN-8 patch vs the real EAN-13.
+    """
+    sym = str(c.symbology or "").upper().replace("-", "_")
+    sym_pri = _symbology_rank(sym)
+    return (not c.valid_check_digit, -float(c.score), -sym_pri)
 
 
 def decode_barcodes_best(bgr: np.ndarray) -> tuple[list[BarcodeCandidate], list[dict[str, Any]]]:
@@ -274,10 +286,7 @@ def decode_barcodes_best(bgr: np.ndarray) -> tuple[list[BarcodeCandidate], list[
         if c.valid_check_digit and c.normalized_gtin_14 and c.score >= 155.0
     ]
     if strong:
-        ranked = sorted(
-            all_candidates.values(),
-            key=lambda x: (not x.valid_check_digit, -x.score),
-        )
+        ranked = sorted(all_candidates.values(), key=barcode_candidate_rank_key)
         debug = [
             {
                 "raw": c.raw_text,
@@ -302,10 +311,7 @@ def decode_barcodes_best(bgr: np.ndarray) -> tuple[list[BarcodeCandidate], list[
     for tag, variant in _preprocessed_bgr_variants(bgr):
         ingest(_decode_with_type_on_image(variant, preprocess=tag))
 
-    ranked = sorted(
-        all_candidates.values(),
-        key=lambda x: (not x.valid_check_digit, -x.score),
-    )
+    ranked = sorted(all_candidates.values(), key=barcode_candidate_rank_key)
     debug = [
         {
             "raw": c.raw_text,

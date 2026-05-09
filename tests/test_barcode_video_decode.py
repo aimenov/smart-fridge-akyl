@@ -25,18 +25,24 @@ def _expected_gtin14_from_stem(path: Path) -> str | None:
     return gn.normalized_gtin_14
 
 
-def _extract_frames_to_images(video_path: Path, out_dir: Path, *, max_frames: int = 7) -> list[Path]:
+def _extract_frames_to_images(video_path: Path, out_dir: Path, *, max_frames: int = 8) -> list[Path]:
     cap = cv2.VideoCapture(str(video_path))
     try:
         if not cap.isOpened():
             return []
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         if total <= 0:
-            # Fallback: just read sequentially.
             indices = list(range(max_frames))
         else:
-            step = max(1, total // max_frames)
-            indices = list(range(0, total, step))[:max_frames]
+            # Clips often start out of focus; prefer the latter half + last frame (same idea as expiry fixtures).
+            anchors = [0.45, 0.52, 0.60, 0.68, 0.75, 0.82, 0.88, 0.93, 0.97]
+            take = max(1, max_frames - 1)
+            step = max(1, len(anchors) // take)
+            picked = anchors[::step][:take]
+            indices = [min(total - 1, max(0, int(total * a))) for a in picked]
+            indices.append(max(0, total - 1))
+            seen: set[int] = set()
+            indices = [i for i in indices if not (i in seen or seen.add(i))]
 
         paths: list[Path] = []
         for i, idx in enumerate(indices):
@@ -45,7 +51,6 @@ def _extract_frames_to_images(video_path: Path, out_dir: Path, *, max_frames: in
             if not ok or frame is None:
                 continue
             out = out_dir / f"frame_{i:02d}.jpg"
-            # OpenCV encodes BGR->JPEG
             cv2.imwrite(str(out), frame)
             paths.append(out)
         return paths
@@ -58,7 +63,7 @@ def test_barcode_video_matches_filename_gtin(video_path: Path, tmp_path: Path):
     expected = _expected_gtin14_from_stem(video_path)
     assert expected is not None, f"video fixture name must encode >=8 digits: {video_path.name}"
 
-    frames = _extract_frames_to_images(video_path, tmp_path, max_frames=7)
+    frames = _extract_frames_to_images(video_path, tmp_path, max_frames=8)
     assert frames, f"could not read frames from {video_path.name}"
 
     result = run_pipeline(frames)

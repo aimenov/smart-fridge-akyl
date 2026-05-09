@@ -17,7 +17,8 @@ class Settings(BaseSettings):
     log_file: Path = Path("./data/logs/smart-fridge.log")
     log_file_max_bytes: int = 5_000_000
     log_file_backup_count: int = 5
-    #: Console prints WARNING+ only; use ``smart_fridge.summary`` logger for scan one-liners at INFO.
+    #: Console prints WARNING+ for most loggers; use ``smart_fridge.summary`` for scan one-liners
+    #: and ``smart_fridge.recognition`` for decode/consensus steps at INFO.
     console_log_level: str = "WARNING"
     #: Rotating log file verbosity (DEBUG keeps pipeline / barcode decode diagnostics).
     file_log_level: str = "DEBUG"

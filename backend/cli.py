@@ -95,10 +95,99 @@ def _cmd_import_ofd(argv: list[str]) -> None:
     )
 
 
+def _wipe_sqlite_rows() -> None:
+    """Clear data when the DB file cannot be deleted (e.g. Windows lock while server runs)."""
+    from backend.app.database import SessionLocal, init_db
+    from backend.app.models.entities import Base
+
+    init_db()
+    db = SessionLocal()
+    try:
+        for table in reversed(Base.metadata.sorted_tables):
+            db.execute(table.delete())
+        db.commit()
+    finally:
+        db.close()
+
+
+def _cmd_db_reset(argv: list[str]) -> None:
+    """Delete the SQLite database file (and WAL sidecars) and recreate empty tables."""
+    import argparse
+
+    ap = argparse.ArgumentParser(prog="smart-fridge db-reset")
+    ap.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Required confirmation — deletes inventory, scans, and catalog cache in this DB file",
+    )
+    args = ap.parse_args(argv)
+
+    if not args.yes:
+        print(
+            "smart-fridge db-reset: deletes the SQLite file behind SMART_FRIDGE_DATABASE_URL "
+            "(including -wal / -shm). Re-run with --yes.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    from backend.app.config import settings
+    from backend.app.database import engine, init_db
+
+    url = settings.database_url
+    if not url.startswith("sqlite:///"):
+        print(
+            "smart-fridge db-reset: only sqlite:/// URLs are supported (file deletion).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    raw = url.removeprefix("sqlite:///")
+    path = Path(raw)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    path = path.resolve()
+
+    engine.dispose()
+    removed_all = True
+    unlink_errors: list[tuple[Path, OSError]] = []
+    for p in (
+        path,
+        path.parent / f"{path.name}-wal",
+        path.parent / f"{path.name}-shm",
+    ):
+        try:
+            if p.is_file():
+                p.unlink()
+                print(f"smart-fridge db-reset: removed {p}", file=sys.stderr)
+        except OSError as exc:
+            removed_all = False
+            unlink_errors.append((p, exc))
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    init_db()
+    if removed_all:
+        print(f"smart-fridge db-reset: empty schema at {path}", file=sys.stderr)
+        return
+
+    for p, exc in unlink_errors:
+        print(f"smart-fridge db-reset: could not remove {p}: {exc}", file=sys.stderr)
+    print(
+        "smart-fridge db-reset: falling back to truncating all tables "
+        "(stop the server first if you need the database files deleted on disk).",
+        file=sys.stderr,
+    )
+    _wipe_sqlite_rows()
+    print("smart-fridge db-reset: all tables truncated.", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> None:
     argv = argv if argv is not None else sys.argv[1:]
     if argv and argv[0] == "import-ofd":
         _cmd_import_ofd(argv[1:])
+        return
+    if argv and argv[0] == "db-reset":
+        _cmd_db_reset(argv[1:])
         return
 
     p = argparse.ArgumentParser(prog="smart-fridge", description="Smart Fridge local API + web UI")
